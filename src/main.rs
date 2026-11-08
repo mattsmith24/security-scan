@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use security_scan::config::Config;
-use security_scan::scanner;
+use security_scan::scanner::{self, cve_bin_tool, cve_bin_tool::Cve};
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
@@ -22,6 +22,7 @@ fn main() -> ExitCode {
     };
 
     let output_dir = output_override.unwrap_or_else(|| config.output_dir());
+    let base_dir = config.base_dir.clone();
 
     println!("config: {}", config_path.display());
     println!("output: {}", output_dir.display());
@@ -30,7 +31,7 @@ fn main() -> ExitCode {
     let mut failures = 0;
 
     for directory in &config.directories {
-        match scanner::scan(directory, &output_dir) {
+        match scanner::scan(directory, &output_dir, &base_dir) {
             Ok(report) => {
                 println!(
                     "{} ({}): {} packages, {} dev-only",
@@ -45,6 +46,7 @@ fn main() -> ExitCode {
                 for output in &report.outputs {
                     println!("    -> {}", output.display());
                 }
+                print_cves(&report.cves);
             }
             Err(error) => {
                 eprintln!("{}: {error}", directory.path.display());
@@ -62,4 +64,39 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// Print the vulnerabilities a scan found.
+fn print_cves(cves: &[Cve]) {
+    if cves.is_empty() {
+        println!("    no known vulnerabilities");
+        return;
+    }
+
+    let counts = cve_bin_tool::by_severity(cves);
+    let summary: Vec<String> = counts
+        .iter()
+        .map(|(severity, count)| format!("{count} {severity}"))
+        .collect();
+
+    println!(
+        "    {} vulnerabilities ({})",
+        cves.len(),
+        summary.join(", ")
+    );
+
+    // The most severe findings are worth showing; the rest are in the
+    // report.
+    let shown = 10.min(cves.len());
+    for cve in &cves[..shown] {
+        let dev = if cve.dev_only { " (dev only)" } else { "" };
+        println!(
+            "        {} {} {}@{} ({}){dev}",
+            cve.severity, cve.number, cve.product, cve.version, cve.score
+        );
+    }
+
+    if shown < cves.len() {
+        println!("        ... and {} more", cves.len() - shown);
+    }
 }

@@ -39,6 +39,12 @@ pub struct Directory {
     /// of the directory being scanned.
     #[serde(default)]
     pub name: Option<String>,
+
+    /// The vendor of the project, e.g. the name of the person or company
+    /// that publishes it. cve-bin-tool is told about it so that the
+    /// vulnerabilities it reports name the right supplier.
+    #[serde(default)]
+    pub vendor: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -208,6 +214,35 @@ type = "rust"
             config.global_setting("scan_interval_hours"),
             Some(&toml::Value::Integer(24))
         );
+    }
+
+    #[test]
+    fn parses_the_vendor_of_a_directory() {
+        let (_dir, path) = write_config(
+            r#"
+[[directories]]
+path = "projects/alpha"
+type = "npm"
+vendor = "mattsmith24"
+"#,
+        );
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.directories[0].vendor.as_deref(), Some("mattsmith24"));
+    }
+
+    #[test]
+    fn the_vendor_is_optional() {
+        let (_dir, path) = write_config(
+            r#"
+[[directories]]
+path = "projects/alpha"
+type = "npm"
+"#,
+        );
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.directories[0].vendor, None);
     }
 
     #[test]

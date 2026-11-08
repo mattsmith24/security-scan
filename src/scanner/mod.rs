@@ -1,12 +1,17 @@
 //! Scanning of the directories listed in the config file.
 
 pub mod cdxgen;
+pub mod cve_bin_tool;
+pub mod identity;
 
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use crate::config::Directory;
+
+use cve_bin_tool::Cve;
+use identity::Identity;
 
 /// A scan that completed, and what it produced.
 #[derive(Debug, Clone)]
@@ -15,7 +20,7 @@ pub struct ScanReport {
     pub directory: PathBuf,
     /// The kind of project it was recognised as.
     pub kind: String,
-    /// The SBOM file written.
+    /// The files written: the SBOM and the CVE report.
     pub outputs: Vec<PathBuf>,
     /// How many packages the SBOM describes.
     pub components: usize,
@@ -23,6 +28,9 @@ pub struct ScanReport {
     pub dev_components: usize,
     /// Declared license -> number of packages under it, most common first.
     pub licenses: Vec<(String, usize)>,
+    /// The vulnerabilities found in the project's packages, most severe
+    /// first.
+    pub cves: Vec<Cve>,
 }
 
 #[derive(Debug, Error)]
@@ -68,22 +76,43 @@ pub enum ScanError {
     UnsupportedType { kind: String },
 }
 
-/// Scan one configured directory, writing its SBOM into `output_dir`.
-pub fn scan(directory: &Directory, output_dir: &Path) -> Result<ScanReport, ScanError> {
+/// Scan one configured directory, writing its SBOM and CVE report into
+/// `output_dir`.
+///
+/// `base_dir` is the directory the scanner itself lives in: cve-bin-tool is
+/// run from there, so that it picks up the virtual environment holding it.
+pub fn scan(
+    directory: &Directory,
+    output_dir: &Path,
+    base_dir: &Path,
+) -> Result<ScanReport, ScanError> {
     if directory.kind.trim().is_empty() {
         return Err(ScanError::UnsupportedType {
             kind: directory.kind.clone(),
         });
     }
 
-    cdxgen::scan(directory, output_dir)
+    let identity = Identity::of(&directory.path, directory.name.as_deref());
+
+    let sbom = cdxgen::scan(directory, output_dir, &identity)?;
+    let cves = cve_bin_tool::scan(directory, output_dir, &identity, &sbom.path, base_dir)?;
+
+    Ok(ScanReport {
+        directory: directory.path.clone(),
+        kind: directory.kind.clone(),
+        outputs: vec![sbom.path, cves.report],
+        components: sbom.components,
+        dev_components: sbom.dev_components,
+        licenses: sbom.licenses,
+        cves: cves.cves,
+    })
 }
 
 /// Build the directory that a scan's output goes into: `<output>/<parent>/<name>`.
 ///
 /// The parent and name of the source directory are used so that two projects
 /// with the same basename in different places do not collide.
-fn output_path(output_dir: &Path, source: &Path) -> PathBuf {
+pub(crate) fn output_path(output_dir: &Path, source: &Path) -> PathBuf {
     let name = source
         .file_name()
         .map(|n| sanitize(&n.to_string_lossy()))

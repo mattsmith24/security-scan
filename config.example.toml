@@ -16,6 +16,8 @@ output_dir = "sbom-out"
 # project type cdxgen is asked to scan for.
 # `name` is optional and names the project in its SBOM; it defaults to the
 # name of the directory.
+# `vendor` is optional and names the supplier of the project; it is passed
+# to cve-bin-tool when the SBOM is scanned for vulnerabilities.
 
 [[directories]]
 path = "~/projects/example-rust"
@@ -25,3 +27,4 @@ type = "rust"
 path = "~/projects/example-python"
 type = "python"
 name = "example-python"
+vendor = "example-vendor"
