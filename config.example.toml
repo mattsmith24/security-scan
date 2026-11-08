@@ -12,7 +12,10 @@ output_dir = "sbom-out"
 
 # Directories to scan. `path` is resolved relative to this file's directory
 # unless it is absolute; a leading `~` expands to your home directory.
-# `type` describes the kind of project held in the directory.
+# `type` describes the kind of project held in the directory, and is the
+# project type cdxgen is asked to scan for.
+# `name` is optional and names the project in its SBOM; it defaults to the
+# name of the directory.
 
 [[directories]]
 path = "~/projects/example-rust"
@@ -21,3 +24,4 @@ type = "rust"
 [[directories]]
 path = "~/projects/example-python"
 type = "python"
+name = "example-python"

@@ -1,6 +1,6 @@
 //! Scanning of the directories listed in the config file.
 
-pub mod npm;
+pub mod cdxgen;
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +15,7 @@ pub struct ScanReport {
     pub directory: PathBuf,
     /// The kind of project it was recognised as.
     pub kind: String,
-    /// The SBOM files written.
+    /// The SBOM file written.
     pub outputs: Vec<PathBuf>,
     /// How many packages the SBOM describes.
     pub components: usize,
@@ -29,6 +29,9 @@ pub struct ScanReport {
 pub enum ScanError {
     #[error("no {file} found in {dir}")]
     MissingFile { dir: PathBuf, file: String },
+
+    #[error("{dir} is not a directory")]
+    MissingDirectory { dir: PathBuf },
 
     #[error("failed to read {path}: {source}")]
     Read {
@@ -47,18 +50,33 @@ pub enum ScanError {
         source: std::io::Error,
     },
 
+    #[error("failed to run {program}: {source}")]
+    Command {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("{program} failed with {status}: {stderr}")]
+    CommandFailed {
+        program: String,
+        status: String,
+        stderr: String,
+    },
+
     #[error("unsupported directory type {kind:?}")]
     UnsupportedType { kind: String },
 }
 
 /// Scan one configured directory, writing its SBOM into `output_dir`.
 pub fn scan(directory: &Directory, output_dir: &Path) -> Result<ScanReport, ScanError> {
-    match directory.kind.as_str() {
-        "npm" => npm::scan(directory, output_dir),
-        other => Err(ScanError::UnsupportedType {
-            kind: other.to_string(),
-        }),
+    if directory.kind.trim().is_empty() {
+        return Err(ScanError::UnsupportedType {
+            kind: directory.kind.clone(),
+        });
     }
+
+    cdxgen::scan(directory, output_dir)
 }
 
 /// Build the directory that a scan's output goes into: `<output>/<parent>/<name>`.

@@ -5,3 +5,9 @@
 
 # Generated SBOMs
 /sbom-out
+
+# Local clone of cve-bin-tool since they don't release often
+/cve-bin-tool
+
+# Generated cve-bin-tool reports
+/output.cve-bin-tool.*.json

@@ -30,9 +30,15 @@ pub struct Directory {
     /// directory containing the config file.
     pub path: PathBuf,
 
-    /// The kind of project in this directory, e.g. `rust` or `python`.
+    /// The kind of project in this directory, e.g. `rust` or `python`. This
+    /// is the project type cdxgen is asked to scan for.
     #[serde(rename = "type")]
     pub kind: String,
+
+    /// The name to record for the project in its SBOM. Defaults to the name
+    /// of the directory being scanned.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -59,11 +65,14 @@ impl Config {
     /// Read and parse the config file at `path`.
     ///
     /// Directory paths are resolved relative to the config file's own
-    /// directory, so a config can be moved around without breaking.
+    /// directory, so a config can be moved around without breaking. The
+    /// config's own path is made absolute first, so that those paths do not
+    /// depend on the directory the scanner happens to be run from.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        let path = path.as_ref();
-        let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
-            path: path.to_path_buf(),
+        let path =
+            std::path::absolute(path.as_ref()).unwrap_or_else(|_| path.as_ref().to_path_buf());
+        let contents = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read {
+            path: path.clone(),
             source,
         })?;
 
