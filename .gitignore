@@ -1,0 +1,7 @@
+/target
+
+# Local configuration — copy config.example.toml to config.toml and edit it.
+/config.toml
+
+# Generated SBOMs
+/sbom-out
