@@ -10,6 +10,16 @@ scan_interval_hours = 24
 # Where the generated SBOMs are written, relative to this file's directory.
 output_dir = "sbom-out"
 
+# How old a cve-bin-tool data source's data may be before the scanner
+# reports the source as stale. cve-bin-tool downloads its data daily, so a
+# week is a long time for a source to go without an update.
+cve_data_stale_days = 7
+
+# Where cve-bin-tool keeps the vulnerability database it scans against.
+# It defaults to `~/.cache/cve-bin-tool`, or wherever `XDG_CACHE_HOME`
+# points.
+# cve_bin_tool_cache_dir = "~/.cache/cve-bin-tool"
+
 # Directories to scan. `path` is resolved relative to this file's directory
 # unless it is absolute; a leading `~` expands to your home directory.
 # `type` describes the kind of project held in the directory, and is the

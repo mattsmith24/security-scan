@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -119,7 +120,42 @@ impl Config {
     pub fn global_setting(&self, key: &str) -> Option<&toml::Value> {
         self.global.get(key)
     }
+
+    /// How old a vulnerability data source's data may be before the scanner
+    /// reports it as stale.
+    ///
+    /// Controlled by the `cve_data_stale_days` global setting, defaulting to
+    /// seven days. cve-bin-tool downloads its data daily, so a source that
+    /// has not been updated in a week has almost certainly stopped.
+    pub fn stale_after(&self) -> Duration {
+        let days = self
+            .global
+            .get("cve_data_stale_days")
+            .and_then(|value| value.as_integer())
+            .unwrap_or(DEFAULT_STALE_DAYS);
+
+        Duration::from_secs((days.max(0) as u64) * 86_400)
+    }
+
+    /// The directory cve-bin-tool keeps its vulnerability data in.
+    ///
+    /// Controlled by the `cve_bin_tool_cache_dir` global setting, defaulting
+    /// to the directory cve-bin-tool itself would use.
+    pub fn cache_dir(&self) -> PathBuf {
+        match self
+            .global
+            .get("cve_bin_tool_cache_dir")
+            .and_then(|value| value.as_str())
+        {
+            Some(path) => resolve_path(Path::new(path), &self.base_dir),
+            None => crate::data_sources::cache_dir(),
+        }
+    }
 }
+
+/// How many days a vulnerability data source's data may be old before the
+/// scanner reports it as stale.
+const DEFAULT_STALE_DAYS: i64 = 7;
 
 /// Resolve `path` against `base`, expanding a leading `~` to the home
 /// directory.

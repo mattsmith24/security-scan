@@ -15,6 +15,7 @@ use serde_json::Value;
 use super::identity::Identity;
 use super::{ScanError, output_path};
 use crate::config::Directory;
+use crate::dates::{civil_from_days, format_rfc3339};
 
 /// The cdxgen binary to run, overridable with the `CDXGEN_PATH` environment
 /// variable.
@@ -374,37 +375,6 @@ fn licenses_of(component: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Format a Unix timestamp as an RFC 3339 UTC timestamp.
-fn format_rfc3339(seconds: i64) -> String {
-    let days = seconds.div_euclid(86_400);
-    let time_of_day = seconds.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        time_of_day / 3600,
-        (time_of_day % 3600) / 60,
-        time_of_day % 60,
-    )
-}
-
-/// Convert a count of days since the Unix epoch into a calendar date.
-///
-/// This is Howard Hinnant's `civil_from_days` algorithm.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-
-    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
-}
-
 /// The name of each month.
 const MONTHS: [&str; 12] = [
     "January",
@@ -447,29 +417,6 @@ fn format_date(seconds: i64) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn formats_the_epoch() {
-        assert_eq!(format_rfc3339(0), "1970-01-01T00:00:00Z");
-    }
-
-    #[test]
-    fn formats_a_known_timestamp() {
-        // 2023-11-14T22:13:20Z
-        assert_eq!(format_rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
-    }
-
-    #[test]
-    fn formats_a_leap_day() {
-        // 2024-02-29T12:00:00Z
-        assert_eq!(format_rfc3339(1_709_208_000), "2024-02-29T12:00:00Z");
-    }
-
-    #[test]
-    fn formats_the_end_of_a_year() {
-        // 2025-12-31T23:59:59Z
-        assert_eq!(format_rfc3339(1_767_225_599), "2025-12-31T23:59:59Z");
-    }
 
     #[test]
     fn serial_numbers_are_uuids() {

@@ -79,3 +79,35 @@ scan always writes to the same path and leaves no stray files behind.
 
 Set `CVE_BIN_TOOL_PATH` to the path of a cve-bin-tool binary to run that
 instead of going through `uv`.
+
+## Vulnerability data
+
+cve-bin-tool does not ask an advisory service for vulnerabilities. It
+downloads them from several sources into a local database, and scans
+against that database. A source that fails to download leaves the scan
+quietly incomplete: cve-bin-tool still writes its report and exits
+successfully, so the findings are simply missing whatever that source
+knew.
+
+The scanner therefore checks the database after every run, and reports any
+source that has no data at all, or data that is too old to trust:
+
+```
+vulnerability data:
+    CURL      ok       239 entries    downloaded 2 days ago
+    EPSS      missing  no data       downloaded 2 days ago
+    GAD       ok       42216 entries downloaded a day ago
+    NVD       missing  no data       downloaded 2 days ago
+    OSV       missing  no data       downloaded 2 days ago
+    PURL2CPE ok       2790044 entries downloaded 3 days ago
+    REDHAT    ok       26946 entries downloaded 3 days ago
+```
+
+A source with no data is always reported. A source whose newest record is
+older than `cve_data_stale_days` — seven days by default — is reported as
+stale. The same report is written to `data-sources.json` in the output
+directory, so that whatever runs the scanner can read it.
+
+The database is `~/.cache/cve-bin-tool/cve.db`, or wherever
+`XDG_CACHE_HOME` points; set `cve_bin_tool_cache_dir` in the config to
+look somewhere else.
