@@ -13,7 +13,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use super::identity::Identity;
-use super::{ScanError, output_path};
+use super::{ScanError, output_path, run_streaming};
 use crate::config::Directory;
 use crate::dates::{civil_from_days, format_rfc3339};
 
@@ -102,7 +102,8 @@ fn run_cdxgen(
     // parent directory, not in the scanner's.
     let output = std::path::absolute(output).unwrap_or_else(|_| output.to_path_buf());
 
-    let result = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .arg("--output")
         .arg(output)
         .arg("--type")
@@ -116,12 +117,12 @@ fn run_cdxgen(
         .arg("--no-install-deps")
         .arg("--json-pretty")
         .arg(name)
-        .current_dir(parent)
-        .output()
-        .map_err(|source| ScanError::Command {
-            program: program.clone(),
-            source,
-        })?;
+        .current_dir(parent);
+
+    let result = run_streaming(&mut command).map_err(|source| ScanError::Command {
+        program: program.clone(),
+        source,
+    })?;
 
     if !result.status.success() {
         return Err(ScanError::CommandFailed {

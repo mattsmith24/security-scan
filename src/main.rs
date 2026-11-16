@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use security_scan::config::Config;
 use security_scan::data_sources::{self, Report};
+use security_scan::progress;
 use security_scan::scanner::{self, cve_bin_tool, cve_bin_tool::Cve};
 
 fn main() -> ExitCode {
@@ -29,9 +30,21 @@ fn main() -> ExitCode {
     println!("output: {}", output_dir.display());
     println!();
 
+    if !data_sources::database(&config.cache_dir()).is_file() {
+        eprintln!("note: cve-bin-tool has no vulnerability database yet, so the");
+        eprintln!("      first scan will download one. That can take a while.");
+        eprintln!();
+    }
+
     let mut failures = 0;
 
     for directory in &config.directories {
+        progress::heading(format!(
+            "scanning {} ({})",
+            directory.path.display(),
+            directory.kind
+        ));
+
         match scanner::scan(directory, &output_dir, &base_dir) {
             Ok(report) => {
                 println!(

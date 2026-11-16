@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use super::cdxgen::is_dev_only;
 use super::identity::Identity;
-use super::{ScanError, output_path};
+use super::{ScanError, output_path, run_streaming};
 use crate::config::Directory;
 
 /// The program cve-bin-tool is run with, unless `CVE_BIN_TOOL_PATH` names
@@ -129,13 +129,12 @@ fn run(
 
     // cve-bin-tool is run from the scanner's own directory, which is where
     // the virtual environment holding it lives.
-    let result = command
-        .current_dir(base_dir)
-        .output()
-        .map_err(|source| ScanError::Command {
-            program: program.clone(),
-            source,
-        })?;
+    command.current_dir(base_dir);
+
+    let result = run_streaming(&mut command).map_err(|source| ScanError::Command {
+        program: program.clone(),
+        source,
+    })?;
 
     // cve-bin-tool exits with 1 when it finds vulnerabilities, which is a
     // successful scan. Anything else means the scan itself went wrong.

@@ -55,6 +55,12 @@ Run the scanner with:
 cargo run -- config.toml
 ```
 
+Progress goes to stderr while the scan runs: each directory, when its SBOM is
+being generated, and when the SBOM is being scanned. The output of cdxgen and
+cve-bin-tool is passed through as they produce it, so cve-bin-tool's download
+messages appear while it is fetching vulnerability data rather than all at
+once at the end. Results stay on stdout.
+
 SBOMs and CVE reports are written to `output_dir` — `sbom-out` by default —
 laid out as `<output>/<parent>/<name>/sbom.cdx.json` and
 `<output>/<parent>/<name>/cve-report.json`, so projects with the same name in
@@ -70,8 +76,9 @@ lockfile, so a scan needs network access and may list packages that are not
 pinned in the lockfile.
 
 cve-bin-tool keeps its CVE database in `~/.cache/cve-bin-tool`, and downloads
-it on first use. A scan of a project with a few hundred packages takes about
-half a minute.
+it on first use. The scanner notes when the database is missing, and prints
+cve-bin-tool's own progress while it downloads. A scan of a project with a
+few hundred packages takes about half a minute.
 
 cve-bin-tool will not write over an existing report: it writes to a freshly
 named file instead. The scanner removes the previous report first, so that a

@@ -158,7 +158,7 @@ impl Report {
 /// `stale_after` how old a source's data may be before it counts as stale.
 /// A source with no data at all is always reported, whatever the age.
 pub fn check(cache_dir: &Path, stale_after: Duration) -> Report {
-    let database = cache_dir.join(DATABASE);
+    let database = database(cache_dir);
     let checked = unix_seconds(SystemTime::now()).unwrap_or_default();
     let stale_after_days = stale_after.as_secs() / 86_400;
 
@@ -241,6 +241,11 @@ pub fn cache_dir() -> PathBuf {
         });
 
     base.join(CACHE_DIRECTORY)
+}
+
+/// The database cve-bin-tool keeps its vulnerability data in.
+pub fn database(cache_dir: &Path) -> PathBuf {
+    cache_dir.join(DATABASE)
 }
 
 /// Open the database read-only, so that checking it cannot disturb a scan
