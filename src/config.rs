@@ -137,6 +137,44 @@ impl Config {
         Duration::from_secs((days.max(0) as u64) * 86_400)
     }
 
+    /// The OSV ecosystems cve-bin-tool should download vulnerability data
+    /// for.
+    ///
+    /// Controlled by the `osv_ecosystems` global setting, either an array of
+    /// OSV ecosystem names such as `["npm", "PyPI"]` or a comma-separated
+    /// string. An empty list leaves the OSV source unfiltered, which is what
+    /// cve-bin-tool does by default.
+    ///
+    /// The scanner also uses this list to check the ecosystems an SBOM
+    /// describes: a package from an ecosystem that the filter leaves out
+    /// would be scanned without its OSV advisories, so that is an error
+    /// rather than a quietly incomplete report.
+    pub fn osv_ecosystems(&self) -> Vec<String> {
+        let Some(value) = self.global.get("osv_ecosystems") else {
+            return Vec::new();
+        };
+
+        let names: Vec<&str> = match value {
+            toml::Value::Array(items) => items.iter().filter_map(toml::Value::as_str).collect(),
+            toml::Value::String(names) => names.split(',').collect(),
+            _ => return Vec::new(),
+        };
+
+        let mut ecosystems: Vec<String> = Vec::new();
+        for name in names {
+            let name = name.trim();
+            if !name.is_empty()
+                && !ecosystems
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(name))
+            {
+                ecosystems.push(name.to_string());
+            }
+        }
+
+        ecosystems
+    }
+
     /// The directory cve-bin-tool keeps its vulnerability data in.
     ///
     /// Controlled by the `cve_bin_tool_cache_dir` global setting, defaulting
@@ -250,6 +288,42 @@ type = "rust"
             config.global_setting("scan_interval_hours"),
             Some(&toml::Value::Integer(24))
         );
+    }
+
+    #[test]
+    fn reads_the_osv_ecosystems_to_download() {
+        let (_dir, path) = write_config(
+            r#"
+osv_ecosystems = ["npm", "PyPI"]
+"#,
+        );
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.osv_ecosystems(), vec!["npm", "PyPI"]);
+    }
+
+    #[test]
+    fn accepts_a_comma_separated_osv_ecosystem_list() {
+        let (_dir, path) = write_config(r#"osv_ecosystems = "npm, PyPI,Go""#);
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.osv_ecosystems(), vec!["npm", "PyPI", "Go"]);
+    }
+
+    #[test]
+    fn osv_ecosystems_are_unfiltered_by_default() {
+        let (_dir, path) = write_config("scan_interval_hours = 24\n");
+
+        let config = Config::load(&path).unwrap();
+        assert!(config.osv_ecosystems().is_empty());
+    }
+
+    #[test]
+    fn ignores_empty_and_duplicate_osv_ecosystems() {
+        let (_dir, path) = write_config(r#"osv_ecosystems = ["npm", "", "NPM", "PyPI"]"#);
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.osv_ecosystems(), vec!["npm", "PyPI"]);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! is the short hash of the project's current git commit, so an SBOM names
 //! exactly which revision was scanned.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,6 +37,8 @@ pub struct Sbom {
     pub dev_components: usize,
     /// Declared license -> number of packages under it, most common first.
     pub licenses: Vec<(String, usize)>,
+    /// Package ecosystem (purl type) -> names of the packages that use it.
+    pub ecosystems: BTreeMap<String, Vec<String>>,
 }
 
 /// Generate a CycloneDX SBOM for a project with cdxgen.
@@ -77,6 +79,7 @@ pub fn scan(
         components: stats.components,
         dev_components: stats.dev_components,
         licenses: stats.licenses,
+        ecosystems: stats.ecosystems,
     })
 }
 
@@ -299,10 +302,13 @@ struct Stats {
     dev_components: usize,
     /// Declared license -> number of packages under it, most common first.
     licenses: Vec<(String, usize)>,
+    /// Package ecosystem (purl type) -> names of the packages that use it.
+    ecosystems: BTreeMap<String, Vec<String>>,
 }
 
 impl Stats {
-    /// Count the components, dev-only components and licenses in an SBOM.
+    /// Count the components, dev-only components, licenses and ecosystems in
+    /// an SBOM.
     fn of(document: &Value) -> Self {
         let components = document
             .get("components")
@@ -311,6 +317,7 @@ impl Stats {
 
         let mut dev_components = 0;
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut ecosystems: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
         if let Some(components) = document.get("components").and_then(Value::as_array) {
             for component in components {
@@ -321,17 +328,50 @@ impl Stats {
                 for license in licenses_of(component) {
                     *counts.entry(license).or_insert(0) += 1;
                 }
+
+                if let Some(ecosystem) = purl_type(component) {
+                    let name = component
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    ecosystems.entry(ecosystem).or_default().insert(name);
+                }
             }
         }
 
         let mut licenses: Vec<(String, usize)> = counts.into_iter().collect();
         licenses.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
+        let ecosystems = ecosystems
+            .into_iter()
+            .map(|(ecosystem, packages)| (ecosystem, packages.into_iter().collect()))
+            .collect();
+
         Self {
             components,
             dev_components,
             licenses,
+            ecosystems,
         }
+    }
+}
+
+/// The purl type a component records, e.g. `npm` for
+/// `pkg:npm/%40scope/name@1.0.0`.
+///
+/// A component without a purl has no ecosystem of its own: cve-bin-tool
+/// matches it by CPE or by name, so there is no OSV ecosystem data for it to
+/// miss.
+fn purl_type(component: &Value) -> Option<String> {
+    let purl = component.get("purl").and_then(Value::as_str)?;
+    let rest = purl.strip_prefix("pkg:")?;
+    let purl_type = rest.split('/').next()?.trim();
+
+    if purl_type.is_empty() {
+        None
+    } else {
+        Some(purl_type.to_ascii_lowercase())
     }
 }
 
@@ -506,6 +546,55 @@ mod tests {
             stats.licenses,
             vec![("MIT".to_string(), 2), ("ISC".to_string(), 1)]
         );
+    }
+
+    #[test]
+    fn collects_the_ecosystems_and_packages_in_an_sbom() {
+        let document = json!({
+            "components": [
+                {"name": "a", "purl": "pkg:npm/a@1.0.0"},
+                {"name": "b", "purl": "pkg:npm/%40scope/b@2.0.0"},
+                {"name": "c", "purl": "pkg:pypi/c@3.0.0"},
+                {"name": "d", "purl": "pkg:deb/debian/d@4.0.0"}
+            ]
+        });
+
+        let stats = Stats::of(&document);
+        assert_eq!(
+            stats.ecosystems,
+            BTreeMap::from([
+                ("deb".to_string(), vec!["d".to_string()]),
+                ("npm".to_string(), vec!["a".to_string(), "b".to_string()]),
+                ("pypi".to_string(), vec!["c".to_string()])
+            ])
+        );
+    }
+
+    #[test]
+    fn components_without_a_purl_have_no_ecosystem() {
+        let document = json!({
+            "components": [
+                {"name": "a"},
+                {"name": "b", "purl": ""},
+                {"name": "c", "purl": "not-a-purl"}
+            ]
+        });
+
+        assert!(Stats::of(&document).ecosystems.is_empty());
+    }
+
+    #[test]
+    fn reads_a_purls_ecosystem() {
+        assert_eq!(
+            purl_type(&json!({"purl": "pkg:npm/%40scope/name@1.0.0"})),
+            Some("npm".to_string())
+        );
+        assert_eq!(
+            purl_type(&json!({"purl": "pkg:golang/example.com/mod@v1.0.0"})),
+            Some("golang".to_string())
+        );
+        assert_eq!(purl_type(&json!({"purl": "pkg:/name@1.0.0"})), None);
+        assert_eq!(purl_type(&json!({})), None);
     }
 
     #[test]

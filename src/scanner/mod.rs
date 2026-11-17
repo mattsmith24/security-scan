@@ -2,6 +2,7 @@
 
 pub mod cdxgen;
 pub mod cve_bin_tool;
+pub mod ecosystems;
 pub mod identity;
 
 use std::collections::VecDeque;
@@ -78,6 +79,13 @@ pub enum ScanError {
 
     #[error("unsupported directory type {kind:?}")]
     UnsupportedType { kind: String },
+
+    #[error(
+        "the SBOM describes package ecosystems that osv_ecosystems filters out:\n    {ecosystems}\n\
+         their OSV advisories would not be downloaded, so the scan could miss vulnerabilities that only OSV reports;\n\
+         add them to osv_ecosystems, or remove osv_ecosystems to download every ecosystem"
+    )]
+    FilteredEcosystems { ecosystems: String },
 }
 
 /// Scan one configured directory, writing its SBOM and CVE report into
@@ -85,10 +93,16 @@ pub enum ScanError {
 ///
 /// `base_dir` is the directory the scanner itself lives in: cve-bin-tool is
 /// run from there, so that it picks up the virtual environment holding it.
+///
+/// `osv_ecosystems` limits the OSV data cve-bin-tool downloads. The SBOM is
+/// checked against it before the CVE scan, so that a package whose ecosystem
+/// is filtered out fails the scan instead of being scanned without its OSV
+/// advisories.
 pub fn scan(
     directory: &Directory,
     output_dir: &Path,
     base_dir: &Path,
+    osv_ecosystems: &[String],
 ) -> Result<ScanReport, ScanError> {
     if directory.kind.trim().is_empty() {
         return Err(ScanError::UnsupportedType {
@@ -102,8 +116,26 @@ pub fn scan(
     let sbom = cdxgen::scan(directory, output_dir, &identity)?;
     step.finish(format!("SBOM: {} packages", sbom.components));
 
+    let filtered = ecosystems::filtered(&sbom.ecosystems, osv_ecosystems);
+    if !filtered.is_empty() {
+        return Err(ScanError::FilteredEcosystems {
+            ecosystems: filtered
+                .iter()
+                .map(ecosystems::Filtered::describe)
+                .collect::<Vec<String>>()
+                .join("\n    "),
+        });
+    }
+
     let step = Step::start("scanning the SBOM for vulnerabilities with cve-bin-tool");
-    let cves = cve_bin_tool::scan(directory, output_dir, &identity, &sbom.path, base_dir)?;
+    let cves = cve_bin_tool::scan(
+        directory,
+        output_dir,
+        &identity,
+        &sbom.path,
+        base_dir,
+        osv_ecosystems,
+    )?;
     step.finish(match cves.cves.len() {
         0 => "no known vulnerabilities".to_string(),
         count => format!("{count} vulnerabilities found"),
@@ -251,6 +283,17 @@ mod tests {
     fn unsafe_names_are_sanitized() {
         assert_eq!(sanitize("my project!"), "my-project-");
         assert_eq!(sanitize("ok-name_1.2"), "ok-name_1.2");
+    }
+
+    #[test]
+    fn names_the_ecosystems_a_filter_excludes() {
+        let error = ScanError::FilteredEcosystems {
+            ecosystems: "deb (2 packages: bash, libssl3)".to_string(),
+        };
+        let text = error.to_string();
+
+        assert!(text.contains("osv_ecosystems filters out"));
+        assert!(text.contains("deb (2 packages: bash, libssl3)"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use security_scan::config::Config;
 use security_scan::data_sources::{self, Report};
 use security_scan::progress;
-use security_scan::scanner::{self, cve_bin_tool, cve_bin_tool::Cve};
+use security_scan::scanner::{self, ScanError, cve_bin_tool, cve_bin_tool::Cve};
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
@@ -25,9 +25,13 @@ fn main() -> ExitCode {
 
     let output_dir = output_override.unwrap_or_else(|| config.output_dir());
     let base_dir = config.base_dir.clone();
+    let osv_ecosystems = config.osv_ecosystems();
 
     println!("config: {}", config_path.display());
     println!("output: {}", output_dir.display());
+    if !osv_ecosystems.is_empty() {
+        println!("osv ecosystems: {}", osv_ecosystems.join(", "));
+    }
     println!();
 
     if !data_sources::database(&config.cache_dir()).is_file() {
@@ -45,7 +49,7 @@ fn main() -> ExitCode {
             directory.kind
         ));
 
-        match scanner::scan(directory, &output_dir, &base_dir) {
+        match scanner::scan(directory, &output_dir, &base_dir, &osv_ecosystems) {
             Ok(report) => {
                 println!(
                     "{} ({}): {} packages, {} dev-only",
@@ -64,6 +68,15 @@ fn main() -> ExitCode {
             }
             Err(error) => {
                 eprintln!("{}: {error}", directory.path.display());
+
+                // The OSV filter is global, so an SBOM that does not fit it
+                // will not be scanned correctly however many directories
+                // remain: stop rather than generate more SBOMs that cannot
+                // be scanned.
+                if matches!(error, ScanError::FilteredEcosystems { .. }) {
+                    return ExitCode::FAILURE;
+                }
+
                 failures += 1;
             }
         }

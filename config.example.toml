@@ -10,6 +10,16 @@ scan_interval_hours = 24
 # Where the generated SBOMs are written, relative to this file's directory.
 output_dir = "sbom-out"
 
+# The OSV ecosystems cve-bin-tool should download vulnerability data for, e.g.
+# `["npm"]` or `["npm", "PyPI", "crates.io"]`. Leaving this out downloads every
+# OSV ecosystem, as cve-bin-tool does by default.
+#
+# After generating an SBOM the scanner checks the ecosystems of its packages
+# against this list. A package from an ecosystem that is not listed would be
+# scanned without its OSV advisories, so the scan fails and names the
+# ecosystem rather than reporting incomplete findings.
+# osv_ecosystems = ["npm"]
+
 # How old a cve-bin-tool data source's data may be before the scanner
 # reports the source as stale. cve-bin-tool downloads its data daily, so a
 # week is a long time for a source to go without an update.

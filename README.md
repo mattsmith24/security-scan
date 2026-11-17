@@ -118,3 +118,30 @@ directory, so that whatever runs the scanner can read it.
 The database is `~/.cache/cve-bin-tool/cve.db`, or wherever
 `XDG_CACHE_HOME` points; set `cve_bin_tool_cache_dir` in the config to
 look somewhere else.
+
+## Limiting OSV ecosystems
+
+cve-bin-tool downloads OSV data for every ecosystem by default, including
+the Linux distributions, whose advisories an npm or Rust project never
+matches. To download only the ecosystems you scan, set `osv_ecosystems` in
+the config:
+
+```toml
+osv_ecosystems = ["npm", "PyPI", "crates.io"]
+```
+
+Names are OSV's own and are matched case-insensitively. A distribution
+name without a release covers every release of it, so `Debian` selects
+`Debian:11` and `Debian:12`. The scanner passes the list to cve-bin-tool as
+`--osv-ecosystems`.
+
+After generating an SBOM, the scanner reads the purl type of every component
+and checks it against that list. If the SBOM contains a package from an
+ecosystem that is not listed — a `deb` package when only `npm` is configured,
+say — the scan stops with an error naming the ecosystem and its packages.
+Those packages' OSV advisories would not be downloaded, so reporting the
+remaining findings as if the scan were complete could hide vulnerabilities
+that only OSV knows about.
+
+Leaving `osv_ecosystems` unset downloads every ecosystem and disables the
+check.

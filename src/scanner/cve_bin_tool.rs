@@ -57,12 +57,16 @@ pub struct Cve {
 }
 
 /// Scan an SBOM for known vulnerabilities with cve-bin-tool.
+///
+/// `osv_ecosystems` limits which OSV ecosystems cve-bin-tool downloads. It is
+/// empty when the config does not filter the OSV source.
 pub fn scan(
     directory: &Directory,
     output_dir: &Path,
     identity: &Identity,
     sbom: &Path,
     base_dir: &Path,
+    osv_ecosystems: &[String],
 ) -> Result<CveScan, ScanError> {
     let out_dir = output_path(output_dir, &directory.path);
     std::fs::create_dir_all(&out_dir).map_err(|source| ScanError::Write {
@@ -82,7 +86,14 @@ pub fn scan(
         })?;
     }
 
-    run(directory, identity, sbom, &report_path, base_dir)?;
+    run(
+        directory,
+        identity,
+        sbom,
+        &report_path,
+        base_dir,
+        osv_ecosystems,
+    )?;
 
     let cves = read_cves(&report_path, sbom)?;
 
@@ -99,6 +110,7 @@ fn run(
     sbom: &Path,
     report: &Path,
     base_dir: &Path,
+    osv_ecosystems: &[String],
 ) -> Result<(), ScanError> {
     let (program, prefix) = command();
 
@@ -125,6 +137,12 @@ fn run(
 
     if let Some(vendor) = &directory.vendor {
         command.arg("--vendor").arg(vendor);
+    }
+
+    if !osv_ecosystems.is_empty() {
+        command
+            .arg("--osv-ecosystems")
+            .arg(osv_ecosystems.join(","));
     }
 
     // cve-bin-tool is run from the scanner's own directory, which is where
