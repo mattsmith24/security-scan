@@ -175,6 +175,18 @@ impl Config {
         ecosystems
     }
 
+    /// Whether to generate and use a CycloneDX VEX for each project.
+    ///
+    /// Controlled by the `vex` global setting, defaulting to true. The VEX is
+    /// written next to the project's SBOM and CVE report, and every later
+    /// scan hands it back to cve-bin-tool so triage decisions are kept.
+    pub fn vex_enabled(&self) -> bool {
+        self.global
+            .get("vex")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true)
+    }
+
     /// The directory cve-bin-tool keeps its vulnerability data in.
     ///
     /// Controlled by the `cve_bin_tool_cache_dir` global setting, defaulting
@@ -353,6 +365,22 @@ type = "npm"
 
         let config = Config::load(&path).unwrap();
         assert_eq!(config.directories[0].vendor, None);
+    }
+
+    #[test]
+    fn vex_is_enabled_by_default() {
+        let (_dir, path) = write_config("scan_interval_hours = 24\n");
+
+        let config = Config::load(&path).unwrap();
+        assert!(config.vex_enabled());
+    }
+
+    #[test]
+    fn vex_can_be_disabled() {
+        let (_dir, path) = write_config("vex = false\n");
+
+        let config = Config::load(&path).unwrap();
+        assert!(!config.vex_enabled());
     }
 
     #[test]

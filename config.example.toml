@@ -10,6 +10,11 @@ scan_interval_hours = 24
 # Where the generated SBOMs are written, relative to this file's directory.
 output_dir = "sbom-out"
 
+# Generate and use a CycloneDX VEX for each project. The first scan writes
+# it next to the SBOM; later scans hand it back to cve-bin-tool so triage
+# decisions are kept, and replace it with a refreshed copy.
+vex = true
+
 # The OSV ecosystems cve-bin-tool should download vulnerability data for, e.g.
 # `["npm"]` or `["npm", "PyPI", "crates.io"]`. Leaving this out downloads every
 # OSV ecosystem, as cve-bin-tool does by default.

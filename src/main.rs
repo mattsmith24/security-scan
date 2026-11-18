@@ -26,6 +26,7 @@ fn main() -> ExitCode {
     let output_dir = output_override.unwrap_or_else(|| config.output_dir());
     let base_dir = config.base_dir.clone();
     let osv_ecosystems = config.osv_ecosystems();
+    let vex_enabled = config.vex_enabled();
 
     println!("config: {}", config_path.display());
     println!("output: {}", output_dir.display());
@@ -49,7 +50,13 @@ fn main() -> ExitCode {
             directory.kind
         ));
 
-        match scanner::scan(directory, &output_dir, &base_dir, &osv_ecosystems) {
+        match scanner::scan(
+            directory,
+            &output_dir,
+            &base_dir,
+            &osv_ecosystems,
+            vex_enabled,
+        ) {
             Ok(report) => {
                 println!(
                     "{} ({}): {} packages, {} dev-only",
@@ -149,13 +156,26 @@ fn write_data_sources(report: &Report, output_dir: &Path) {
 }
 
 /// Print the vulnerabilities a scan found.
+///
+/// Findings the VEX has dismissed are left out of the summary, but remain in
+/// the report, which records the state of every finding.
 fn print_cves(cves: &[Cve]) {
-    if cves.is_empty() {
-        println!("    no known vulnerabilities");
+    let filtered = cves.iter().filter(|cve| cve.is_triaged()).count();
+    let active: Vec<Cve> = cves
+        .iter()
+        .filter(|cve| !cve.is_triaged())
+        .cloned()
+        .collect();
+
+    if active.is_empty() {
+        match filtered {
+            0 => println!("    no known vulnerabilities"),
+            count => println!("    no known vulnerabilities ({count} filtered by the VEX)"),
+        }
         return;
     }
 
-    let counts = cve_bin_tool::by_severity(cves);
+    let counts = cve_bin_tool::by_severity(&active);
     let summary: Vec<String> = counts
         .iter()
         .map(|(severity, count)| format!("{count} {severity}"))
@@ -163,14 +183,14 @@ fn print_cves(cves: &[Cve]) {
 
     println!(
         "    {} vulnerabilities ({})",
-        cves.len(),
+        active.len(),
         summary.join(", ")
     );
 
     // The most severe findings are worth showing; the rest are in the
     // report.
-    let shown = 10.min(cves.len());
-    for cve in &cves[..shown] {
+    let shown = 10.min(active.len());
+    for cve in &active[..shown] {
         let dev = if cve.dev_only { " (dev only)" } else { "" };
         println!(
             "        {} {} {}@{} ({}){dev}",
@@ -178,7 +198,11 @@ fn print_cves(cves: &[Cve]) {
         );
     }
 
-    if shown < cves.len() {
-        println!("        ... and {} more", cves.len() - shown);
+    if shown < active.len() {
+        println!("        ... and {} more", active.len() - shown);
+    }
+
+    if filtered > 0 {
+        println!("    {filtered} filtered by the VEX");
     }
 }

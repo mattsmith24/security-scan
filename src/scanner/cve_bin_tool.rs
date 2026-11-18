@@ -24,6 +24,25 @@ const PROGRAM: &str = "uv";
 /// The name of the report written for each project.
 const OUTPUT_NAME: &str = "cve-report.json";
 
+/// The VEX written for each project.
+const VEX_NAME: &str = "vex.cdx.json";
+
+/// The VEX cve-bin-tool writes before it is moved into place.
+///
+/// cve-bin-tool refuses to overwrite a VEX it is given, and keeps a
+/// numbered backup of one it updates. Writing to a fresh path avoids both,
+/// and leaves the previous VEX untouched if the scan fails.
+const VEX_TMP_NAME: &str = "vex.next.json";
+
+/// The VEX format cve-bin-tool is asked to write.
+const VEX_TYPE: &str = "cyclonedx";
+
+/// The vendor recorded in a VEX when the project does not name one.
+///
+/// cve-bin-tool requires a vendor to generate a VEX, though it only uses it
+/// for the document's metadata.
+const DEFAULT_VENDOR: &str = "unknown";
+
 /// The severities a finding can have, most severe first. Anything the report
 /// does not name is treated as less severe than all of these.
 const SEVERITIES: [&str; 6] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN", "NONE"];
@@ -35,6 +54,8 @@ const STDERR_LINES: usize = 20;
 pub struct CveScan {
     /// The report cve-bin-tool wrote.
     pub report: PathBuf,
+    /// The VEX written for the project, if it has one.
+    pub vex: Option<PathBuf>,
     /// The findings, most severe first.
     pub cves: Vec<Cve>,
 }
@@ -52,14 +73,33 @@ pub struct Cve {
     pub product: String,
     /// The version of that package.
     pub version: String,
+    /// What the VEX says about the finding, e.g. `NewFound` or
+    /// `NotAffected`. Empty when no VEX was used.
+    pub remarks: String,
     /// Whether the package is only needed to develop the project.
     pub dev_only: bool,
+}
+
+impl Cve {
+    /// Whether triage has already dismissed this finding.
+    ///
+    /// These are the states cve-bin-tool's `--filter-triage` removes.
+    pub fn is_triaged(&self) -> bool {
+        ["NotAffected", "FalsePositive", "Mitigated"]
+            .iter()
+            .any(|state| self.remarks.eq_ignore_ascii_case(state))
+    }
 }
 
 /// Scan an SBOM for known vulnerabilities with cve-bin-tool.
 ///
 /// `osv_ecosystems` limits which OSV ecosystems cve-bin-tool downloads. It is
 /// empty when the config does not filter the OSV source.
+///
+/// When `vex_enabled` is set, the project's VEX is handed back to cve-bin-tool
+/// so its triage decisions are applied, and a refreshed VEX is written for the
+/// next scan. The report keeps every finding, including the triaged ones, so
+/// callers can still see why something was dismissed.
 pub fn scan(
     directory: &Directory,
     output_dir: &Path,
@@ -67,6 +107,7 @@ pub fn scan(
     sbom: &Path,
     base_dir: &Path,
     osv_ecosystems: &[String],
+    vex_enabled: bool,
 ) -> Result<CveScan, ScanError> {
     let out_dir = output_path(output_dir, &directory.path);
     std::fs::create_dir_all(&out_dir).map_err(|source| ScanError::Write {
@@ -74,6 +115,8 @@ pub fn scan(
         source,
     })?;
     let report_path = out_dir.join(OUTPUT_NAME);
+    let vex_path = out_dir.join(VEX_NAME);
+    let vex_tmp = out_dir.join(VEX_TMP_NAME);
 
     // cve-bin-tool will not write over an existing report: it picks a freshly
     // named file instead, which would leave this scan's findings somewhere
@@ -86,19 +129,59 @@ pub fn scan(
         })?;
     }
 
-    run(
+    // A temporary VEX left by an interrupted scan would be stale.
+    if vex_enabled && vex_tmp.exists() {
+        std::fs::remove_file(&vex_tmp).map_err(|source| ScanError::Write {
+            path: vex_tmp.clone(),
+            source,
+        })?;
+    }
+
+    let vex_paths = vex_enabled.then(|| (vex_path.as_path(), vex_tmp.as_path()));
+
+    if let Err(error) = run(
         directory,
         identity,
         sbom,
         &report_path,
         base_dir,
         osv_ecosystems,
-    )?;
+        vex_paths,
+    ) {
+        if let Some((_, tmp)) = vex_paths {
+            let _ = std::fs::remove_file(tmp);
+        }
+        return Err(error);
+    }
+
+    let vex = match vex_paths {
+        Some((path, tmp)) => {
+            if tmp.is_file() {
+                std::fs::rename(tmp, path).map_err(|source| ScanError::Write {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                Some(path.to_path_buf())
+            } else {
+                // cve-bin-tool writes no VEX when there is nothing to report,
+                // so an old one no longer describes the project.
+                if path.exists() {
+                    std::fs::remove_file(path).map_err(|source| ScanError::Write {
+                        path: path.to_path_buf(),
+                        source,
+                    })?;
+                }
+                None
+            }
+        }
+        None => None,
+    };
 
     let cves = read_cves(&report_path, sbom)?;
 
     Ok(CveScan {
         report: report_path,
+        vex,
         cves,
     })
 }
@@ -111,6 +194,7 @@ fn run(
     report: &Path,
     base_dir: &Path,
     osv_ecosystems: &[String],
+    vex: Option<(&Path, &Path)>,
 ) -> Result<(), ScanError> {
     let (program, prefix) = command();
 
@@ -118,6 +202,12 @@ fn run(
     // own directory, not next to the SBOM.
     let sbom = std::path::absolute(sbom).unwrap_or_else(|_| sbom.to_path_buf());
     let report = std::path::absolute(report).unwrap_or_else(|_| report.to_path_buf());
+    let vex = vex.map(|(path, tmp)| {
+        (
+            std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+            std::path::absolute(tmp).unwrap_or_else(|_| tmp.to_path_buf()),
+        )
+    });
 
     let mut command = Command::new(&program);
     command.args(prefix);
@@ -135,8 +225,32 @@ fn run(
         .arg("--release")
         .arg(&identity.version);
 
-    if let Some(vendor) = &directory.vendor {
-        command.arg("--vendor").arg(vendor);
+    match (&directory.vendor, vex.is_some()) {
+        (Some(vendor), _) => {
+            command.arg("--vendor").arg(vendor);
+        }
+        // cve-bin-tool requires a vendor to generate a VEX, though it only
+        // uses it for the document's metadata.
+        (None, true) => {
+            command.arg("--vendor").arg(DEFAULT_VENDOR);
+        }
+        (None, false) => {}
+    }
+
+    if let Some((vex_path, vex_tmp)) = &vex {
+        command
+            .arg("--vex-type")
+            .arg(VEX_TYPE)
+            .arg("--vex-output")
+            .arg(vex_tmp);
+
+        if vex_path.is_file() {
+            command
+                .arg("--vex-file")
+                .arg(vex_path)
+                .arg("--revision-reason")
+                .arg(format!("scan {}", identity.version));
+        }
     }
 
     if !osv_ecosystems.is_empty() {
@@ -211,6 +325,7 @@ fn read_cves(report: &Path, sbom: &Path) -> Result<Vec<Cve>, ScanError> {
             score: field(entry, "score"),
             product: field(entry, "product"),
             version: field(entry, "version"),
+            remarks: field(entry, "remarks"),
             dev_only: false,
         })
         .collect();
@@ -335,6 +450,26 @@ mod tests {
     }
 
     #[test]
+    fn hides_the_states_triage_has_dismissed() {
+        let cve = |remarks: &str| Cve {
+            number: "CVE-1".to_string(),
+            severity: "LOW".to_string(),
+            score: "3.1".to_string(),
+            product: "a".to_string(),
+            version: "1.0".to_string(),
+            remarks: remarks.to_string(),
+            dev_only: false,
+        };
+
+        for remarks in ["NotAffected", "FalsePositive", "Mitigated"] {
+            assert!(cve(remarks).is_triaged(), "{remarks} should be triaged");
+        }
+        for remarks in ["NewFound", "Confirmed", "Unexplored", ""] {
+            assert!(!cve(remarks).is_triaged(), "{remarks} should be visible");
+        }
+    }
+
+    #[test]
     fn counts_findings_by_severity() {
         let cves = vec![
             Cve {
@@ -343,6 +478,7 @@ mod tests {
                 score: "7.5".to_string(),
                 product: "a".to_string(),
                 version: "1.0".to_string(),
+                remarks: "NewFound".to_string(),
                 dev_only: false,
             },
             Cve {
@@ -351,6 +487,7 @@ mod tests {
                 score: "7.5".to_string(),
                 product: "b".to_string(),
                 version: "1.0".to_string(),
+                remarks: "NewFound".to_string(),
                 dev_only: false,
             },
             Cve {
@@ -359,6 +496,7 @@ mod tests {
                 score: "3.1".to_string(),
                 product: "c".to_string(),
                 version: "1.0".to_string(),
+                remarks: "NewFound".to_string(),
                 dev_only: false,
             },
         ];

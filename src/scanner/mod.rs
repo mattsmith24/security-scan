@@ -98,11 +98,14 @@ pub enum ScanError {
 /// checked against it before the CVE scan, so that a package whose ecosystem
 /// is filtered out fails the scan instead of being scanned without its OSV
 /// advisories.
+///
+/// `vex_enabled` makes the CVE scan generate and use the project's VEX.
 pub fn scan(
     directory: &Directory,
     output_dir: &Path,
     base_dir: &Path,
     osv_ecosystems: &[String],
+    vex_enabled: bool,
 ) -> Result<ScanReport, ScanError> {
     if directory.kind.trim().is_empty() {
         return Err(ScanError::UnsupportedType {
@@ -135,16 +138,22 @@ pub fn scan(
         &sbom.path,
         base_dir,
         osv_ecosystems,
+        vex_enabled,
     )?;
     step.finish(match cves.cves.len() {
         0 => "no known vulnerabilities".to_string(),
         count => format!("{count} vulnerabilities found"),
     });
 
+    let mut outputs = vec![sbom.path, cves.report];
+    if let Some(vex) = &cves.vex {
+        outputs.push(vex.clone());
+    }
+
     Ok(ScanReport {
         directory: directory.path.clone(),
         kind: directory.kind.clone(),
-        outputs: vec![sbom.path, cves.report],
+        outputs,
         components: sbom.components,
         dev_components: sbom.dev_components,
         licenses: sbom.licenses,
