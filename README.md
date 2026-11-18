@@ -6,13 +6,30 @@ Install cdxgen
 npm install -g @cdxgen/cdxgen --ignore-scripts --min-release-age=2
 ```
 
-Install cve-bin-tool with uv:
+Install cve-bin-tool with uv, from my fork rather than upstream:
 
 ```sh
-git clone https://github.com/ossf/cve-bin-tool.git
+git clone --branch fix/npm-scope-preservation \
+          https://github.com/mattsmith24/cve-bin-tool.git
 uv venv
 uv pip install --user -e cve-bin-tool
 ```
+
+The scanner relies on fixes that are not in `ossf/cve-bin-tool` yet, so it
+needs the fork's `fix/npm-scope-preservation` branch. That branch is a small
+set of commits on top of upstream `main`, which is rebased onto upstream as it
+moves; the fork also keeps a `main` that tracks upstream.
+
+Cloning the fork sets `origin` to the fork. To keep up with upstream, add it as
+a second remote:
+
+```sh
+git remote add upstream https://github.com/ossf/cve-bin-tool.git
+git fetch upstream
+```
+
+Because the package is installed editable, changes made in `cve-bin-tool` are
+picked up by the next scan without reinstalling.
 
 ## Scanning
 
