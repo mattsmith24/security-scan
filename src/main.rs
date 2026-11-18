@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -5,9 +6,25 @@ use security_scan::config::Config;
 use security_scan::data_sources::{self, Report};
 use security_scan::progress;
 use security_scan::scanner::{self, ScanError, cve_bin_tool, cve_bin_tool::Cve};
+use security_scan::triage;
+
+const USAGE: &str = "\
+usage: security-scan [config.toml] [output-dir]
+       security-scan triage <project> [--config config.toml] [--output output-dir]";
 
 fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1);
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+
+    if args.first().and_then(|arg| arg.to_str()) == Some("triage") {
+        return triage_command(&args[1..]);
+    }
+
+    scan_command(&args)
+}
+
+/// Run the scans, then report on the vulnerability data they used.
+fn scan_command(args: &[OsString]) -> ExitCode {
+    let mut args = args.iter();
 
     let config_path = args
         .next()
@@ -108,6 +125,111 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Triage the findings in one project's VEX.
+fn triage_command(args: &[OsString]) -> ExitCode {
+    let mut args = args.iter();
+
+    let mut project = None;
+    let mut config_path = PathBuf::from("config.toml");
+    let mut output_override = None;
+
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--config") => match args.next() {
+                Some(path) => config_path = PathBuf::from(path),
+                None => {
+                    eprintln!("error: --config needs a path\n{USAGE}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            Some("--output") => match args.next() {
+                Some(path) => output_override = Some(PathBuf::from(path)),
+                None => {
+                    eprintln!("error: --output needs a path\n{USAGE}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            Some("-h" | "--help") => {
+                println!("{USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            Some(flag) if flag.starts_with('-') => {
+                eprintln!("error: unknown option {flag}\n{USAGE}");
+                return ExitCode::FAILURE;
+            }
+            _ if project.is_none() => project = Some(arg.to_string_lossy().into_owned()),
+            _ => {
+                eprintln!(
+                    "error: unexpected argument {}\n{USAGE}",
+                    arg.to_string_lossy()
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let Some(project) = project else {
+        eprintln!("error: triage needs a project name\n{USAGE}");
+        return ExitCode::FAILURE;
+    };
+
+    let config = match Config::load(&config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let output_dir = output_override.unwrap_or_else(|| config.output_dir());
+    let vex = match triage::find_vex(&output_dir, &project) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("vex: {}", vex.display());
+    println!();
+
+    match triage::triage(&vex) {
+        Ok(summary) => {
+            print_triage(&summary);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Print what a triage session decided.
+fn print_triage(summary: &triage::Summary) {
+    if summary.counts.is_empty() {
+        println!("no findings");
+    } else {
+        let counts: Vec<String> = summary
+            .counts
+            .iter()
+            .map(|(state, count)| format!("{count} {}", triage::describe_state(state)))
+            .collect();
+        let noun = if summary.total == 1 {
+            "finding"
+        } else {
+            "findings"
+        };
+        println!("{} {noun}: {}", summary.total, counts.join(", "));
+    }
+
+    if summary.changed {
+        println!("decisions written to the VEX");
+    } else {
+        println!("no decisions changed");
+    }
+}
+
 /// Print what the scanner knows about cve-bin-tool's data sources.
 fn print_data_sources(report: &Report) {
     let updated = match report.updated {
@@ -146,7 +268,10 @@ fn write_data_sources(report: &Report, output_dir: &Path) {
     let path = output_dir.join("data-sources.json");
 
     if let Err(error) = std::fs::create_dir_all(output_dir) {
-        eprintln!("warning: failed to create {}: {error}", output_dir.display());
+        eprintln!(
+            "warning: failed to create {}: {error}",
+            output_dir.display()
+        );
         return;
     }
 
