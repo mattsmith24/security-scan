@@ -178,8 +178,11 @@ The project is named the way it is in its VEX: the `name` from the config, or
 the name of its directory. `--config` and `--output` override where the config
 and output directory are read from, and default to `config.toml` and the
 config's `output_dir`. The command finds the project's `vex.cdx.json` under
-the output directory and shows each finding in turn, with its description and
-the decision already recorded for it.
+the output directory and shows each finding in turn, most severe first:
+critical, then high, medium, low and unrated. The severity and score come
+from the `cve-report.json` next to the VEX; without one, findings stay in the
+order the VEX lists them. Each finding is shown with its description and the
+decision already recorded for it.
 
 One keypress records a decision:
 

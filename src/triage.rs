@@ -10,15 +10,26 @@
 //! The states written are the ones cve-bin-tool maps to its remarks:
 //! `not_affected`, `false_positive` and `resolved` are filtered out of the
 //! summary, while `in_triage` and `exploitable` stay visible.
+//!
+//! A VEX records no severity, so findings are shown most severe first using
+//! the CVE report written next to it, which cve-bin-tool fills in for every
+//! finding.
 
+use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::scanner::cve_bin_tool;
+
 /// The VEX file written next to each project's SBOM.
 const VEX_NAME: &str = "vex.cdx.json";
+
+/// The CVE report written next to the VEX, which records each finding's
+/// severity.
+const REPORT_NAME: &str = "cve-report.json";
 
 /// The file a triage session writes before moving it into place.
 const TMP_NAME: &str = "vex.triage.tmp";
@@ -227,6 +238,12 @@ pub fn triage_with(path: &Path, prompter: &mut impl Prompter) -> Result<Summary,
     let mut changed = false;
     let mut quit = false;
 
+    let severities = severities(path);
+    if total > 0 && severities.is_empty() {
+        eprintln!("note: no {REPORT_NAME} next to the VEX, so findings keep VEX order");
+    }
+    let order = display_order(vulnerabilities, &severities);
+
     if total > 0 {
         let noun = if total == 1 { "finding" } else { "findings" };
         eprintln!();
@@ -238,12 +255,14 @@ pub fn triage_with(path: &Path, prompter: &mut impl Prompter) -> Result<Summary,
         eprintln!();
     }
 
-    for (index, vulnerability) in vulnerabilities.iter_mut().enumerate() {
+    for (position, &index) in order.iter().enumerate() {
         if quit {
             break;
         }
 
-        show(index + 1, total, vulnerability);
+        let vulnerability = &mut vulnerabilities[index];
+        let severity = severities.get(&finding_key(vulnerability));
+        show(position + 1, total, vulnerability, severity);
 
         loop {
             let key = match prompter.key("  decision [n/f/r/e/t/s/q]: ") {
@@ -348,8 +367,88 @@ fn line(prompter: &mut impl Prompter, prompt: &str) -> Result<String, TriageErro
     }
 }
 
+/// The severity of a finding, as cve-bin-tool recorded it in the report.
+struct Severity {
+    name: String,
+    score: String,
+}
+
+/// Read each finding's severity from the CVE report next to the VEX.
+///
+/// The report is keyed by the package a finding is in and its CVE number,
+/// which is also what identifies a finding in the VEX. An unreadable or
+/// missing report gives an empty map: triage still works, just in VEX order.
+fn severities(vex: &Path) -> BTreeMap<(String, String), Severity> {
+    let path = vex.with_file_name(REPORT_NAME);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return BTreeMap::new();
+    };
+    let Ok(entries) = serde_json::from_str::<Vec<Value>>(&text) else {
+        return BTreeMap::new();
+    };
+
+    let mut severities = BTreeMap::new();
+    for entry in entries {
+        let Some(product) = entry.get("product").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(version) = entry.get("version").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(number) = entry.get("cve_number").and_then(Value::as_str) else {
+            continue;
+        };
+
+        severities.insert(
+            (format!("{product}@{version}"), number.to_string()),
+            Severity {
+                name: entry
+                    .get("severity")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                score: entry
+                    .get("score")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+        );
+    }
+
+    severities
+}
+
+/// What identifies a finding in both the VEX and the CVE report.
+fn finding_key(vulnerability: &Value) -> (String, String) {
+    (
+        string_field(vulnerability, "bom-ref"),
+        string_field(vulnerability, "id"),
+    )
+}
+
+/// The order findings are shown in: most severe first, then VEX order.
+fn display_order(
+    vulnerabilities: &[Value],
+    severities: &BTreeMap<(String, String), Severity>,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..vulnerabilities.len()).collect();
+
+    // The sort is stable, so findings of the same severity keep the order
+    // the VEX lists them in, which groups them by package.
+    order.sort_by_key(|&index| {
+        severities
+            .get(&finding_key(&vulnerabilities[index]))
+            .map_or(usize::MAX, |severity| {
+                cve_bin_tool::severity_rank(&severity.name)
+            })
+    });
+
+    order
+}
+
 /// Show one finding: what it is, where it is, and what has been decided.
-fn show(index: usize, total: usize, vulnerability: &Value) {
+fn show(index: usize, total: usize, vulnerability: &Value, severity: Option<&Severity>) {
     let id = string_field(vulnerability, "id");
     let package = string_field(vulnerability, "bom-ref");
     let analysis = vulnerability.get("analysis");
@@ -362,6 +461,13 @@ fn show(index: usize, total: usize, vulnerability: &Value) {
     eprintln!();
     eprintln!("[{index}/{total}] {id} in {package}");
     eprintln!("         state: {}", describe_state(state));
+
+    if let Some(severity) = severity {
+        match severity.score.as_str() {
+            "" | "unknown" => eprintln!("         severity: {}", severity.name),
+            score => eprintln!("         severity: {} ({score})", severity.name),
+        }
+    }
 
     if let Some(detail) = analysis
         .and_then(|analysis| analysis.get("detail"))
@@ -877,6 +983,81 @@ mod tests {
                     ("resolved_with_pedigree", 1),
                 ]
             );
+        });
+    }
+
+    fn write_report(path: &Path, entries: Value) {
+        std::fs::write(
+            path.with_file_name(REPORT_NAME),
+            serde_json::to_string(&entries).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn shows_the_most_severe_findings_first() {
+        let document = vex(json!([
+            finding("GHSA-LOW"),
+            finding("GHSA-CRITICAL"),
+            finding("GHSA-HIGH"),
+            finding("GHSA-MISSING"),
+            finding("GHSA-MEDIUM"),
+        ]));
+
+        with_temp_document(&document, |path| {
+            write_report(
+                path,
+                json!([
+                    { "product": "vite", "version": "8.0.16", "cve_number": "GHSA-LOW", "severity": "LOW", "score": "2.0" },
+                    { "product": "vite", "version": "8.0.16", "cve_number": "GHSA-CRITICAL", "severity": "CRITICAL", "score": "9.8" },
+                    { "product": "vite", "version": "8.0.16", "cve_number": "GHSA-HIGH", "severity": "HIGH", "score": "7.5" },
+                    { "product": "vite", "version": "8.0.16", "cve_number": "GHSA-MEDIUM", "severity": "MEDIUM", "score": "5.0" },
+                ]),
+            );
+
+            let written: Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let vulnerabilities = written["vulnerabilities"].as_array().unwrap();
+
+            let order = display_order(vulnerabilities, &severities(path));
+            assert_eq!(order, vec![1, 2, 4, 0, 3]);
+        });
+    }
+
+    #[test]
+    fn keeps_vex_order_without_a_report() {
+        let document = vex(json!([finding("A"), finding("B"), finding("C")]));
+
+        with_temp_document(&document, |path| {
+            let written: Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let vulnerabilities = written["vulnerabilities"].as_array().unwrap();
+
+            let severities = severities(path);
+            assert!(severities.is_empty());
+            assert_eq!(display_order(vulnerabilities, &severities), vec![0, 1, 2]);
+        });
+    }
+
+    #[test]
+    fn reads_severity_by_package_and_cve() {
+        let document = vex(json!([finding("GHSA-1")]));
+
+        with_temp_document(&document, |path| {
+            write_report(
+                path,
+                json!([
+                    { "product": "vite", "version": "8.0.16", "cve_number": "GHSA-1", "severity": "HIGH", "score": "7.5" },
+                    { "product": "other", "version": "1.0.0", "cve_number": "GHSA-1", "severity": "LOW", "score": "2.0" },
+                ]),
+            );
+
+            let severities = severities(path);
+            let severity = severities
+                .get(&("vite@8.0.16".to_string(), "GHSA-1".to_string()))
+                .unwrap();
+            assert_eq!(severity.name, "HIGH");
+            assert_eq!(severity.score, "7.5");
         });
     }
 

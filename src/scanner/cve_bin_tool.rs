@@ -386,7 +386,7 @@ fn field(entry: &Value, name: &str) -> String {
 }
 
 /// How severe a finding is, lower being more severe.
-fn severity_rank(severity: &str) -> usize {
+pub(crate) fn severity_rank(severity: &str) -> usize {
     SEVERITIES
         .iter()
         .position(|known| known.eq_ignore_ascii_case(severity))
