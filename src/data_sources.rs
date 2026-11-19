@@ -620,10 +620,16 @@ mod tests {
             .execute("INSERT INTO metrics VALUES (1, 'EPSS')", [])
             .unwrap();
         connection
-            .execute("INSERT INTO cve_metrics VALUES ('CVE-4', 1, 0.5, 'EPSS')", [])
+            .execute(
+                "INSERT INTO cve_metrics VALUES ('CVE-4', 1, 0.5, 'EPSS')",
+                [],
+            )
             .unwrap();
         connection
-            .execute("INSERT INTO purl2cpe VALUES ('pkg:npm/a', 'cpe:2.3:a:a:1.0')", [])
+            .execute(
+                "INSERT INTO purl2cpe VALUES ('pkg:npm/a', 'cpe:2.3:a:a:1.0')",
+                [],
+            )
             .unwrap();
         drop(connection);
 

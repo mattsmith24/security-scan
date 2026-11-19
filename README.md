@@ -1,5 +1,12 @@
 Project to automate CVE scanning of my development projects
 
+Building the scanner needs `pkg-config` and the OpenSSL development headers,
+because its SMTP dependency (`lettre`) uses the system TLS library:
+
+```sh
+sudo apt install pkg-config libssl-dev
+```
+
 Install cdxgen
 
 ```sh

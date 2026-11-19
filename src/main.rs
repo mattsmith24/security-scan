@@ -39,6 +39,7 @@ fn scan_command(args: &[OsString]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    print_config_warnings(&config);
 
     let output_dir = output_override.unwrap_or_else(|| config.output_dir());
     let base_dir = config.base_dir.clone();
@@ -125,6 +126,13 @@ fn scan_command(args: &[OsString]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Print config problems that do not stop the scan.
+fn print_config_warnings(config: &Config) {
+    for warning in config.warnings() {
+        eprintln!("{warning}");
+    }
+}
+
 /// Triage the findings in one project's VEX.
 fn triage_command(args: &[OsString]) -> ExitCode {
     let mut args = args.iter();
@@ -182,6 +190,7 @@ fn triage_command(args: &[OsString]) -> ExitCode {
     };
 
     let output_dir = output_override.unwrap_or_else(|| config.output_dir());
+    print_config_warnings(&config);
     let vex = match triage::find_vex(&output_dir, &project) {
         Ok(path) => path,
         Err(error) => {

@@ -35,6 +35,38 @@ cve_data_stale_days = 7
 # points.
 # cve_bin_tool_cache_dir = "~/.cache/cve-bin-tool"
 
+# Email alerts. A scan emails its report when it finishes, but only when
+# `email_to`, `email_from` and `smtp_host` are all set and `email` is not
+# false. Leave the keys out and scans run silently as before.
+#
+# `email_from` may carry a display name. Gmail only accepts the account you
+# authenticate as (or an alias verified for it), so keep it equal to
+# `smtp_user` unless you have set up an alias.
+# email_to = ["you@gmail.com", "other@example.com"]
+# email_from = "Security Scan <you@gmail.com>"
+
+# Gmail SMTP. Use an App Password, which needs 2FA on the Google account;
+# your normal account password will not work.
+#
+# The config file holds that password, so keep it private:
+#
+#     chmod 600 config.toml
+#
+# The scanner warns at startup when the file is readable by group or others.
+# smtp_host = "smtp.gmail.com"
+# smtp_port = 587
+# smtp_user = "you@gmail.com"
+# smtp_password = "xxxx xxxx xxxx xxxx"
+
+# Optional. Inferred from the port when omitted: 587 uses STARTTLS, 465 uses
+# implicit TLS. `none` sends no TLS and is only for a local test relay such
+# as Mailpit (`smtp_host = "127.0.0.1"`, `smtp_port = 1025`). Authentication
+# is skipped when `smtp_user` is unset.
+# smtp_tls = "starttls"
+
+# Master switch for email alerts. `--no-email` turns them off for one run.
+# email = true
+
 # Directories to scan. `path` is resolved relative to this file's directory
 # unless it is absolute; a leading `~` expands to your home directory.
 # `type` describes the kind of project held in the directory, and is the
