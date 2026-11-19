@@ -1,0 +1,23 @@
+[Unit]
+Description=Daily security scan
+Documentation=file://@REPO@/README.md
+
+[Service]
+Type=oneshot
+# The scanner reads config.toml from here, and runs cve-bin-tool through the
+# uv virtual environment in the same directory.
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/systemd/run-scan.sh
+Environment=SECURITY_SCAN_REPO=@REPO@
+SyslogIdentifier=security-scan
+
+# A first scan downloads cve-bin-tool's vulnerability database, which can take
+# much longer than the default start timeout.
+TimeoutStartSec=infinity
+
+# This is a background job: keep it out of the way of whatever else the
+# machine is doing.
+Nice=10
+
+# The scan only reads projects and runs its own tools.
+NoNewPrivileges=yes

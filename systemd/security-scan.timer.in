@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the daily security scan
+
+[Timer]
+# Early morning, after the machine's other nightly jobs. RandomizedDelaySec
+# keeps it from landing on the hour.
+OnCalendar=*-*-* 04:17:00
+RandomizedDelaySec=15min
+
+# Run a scan that was missed while the machine was off at the next boot,
+# rather than waiting until tomorrow.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

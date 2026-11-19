@@ -234,3 +234,59 @@ that only OSV knows about.
 
 Leaving `osv_ecosystems` unset downloads every ecosystem and disables the
 check.
+
+## Running a daily scan
+
+`systemd/` holds a user service and timer that scan once a day. Install them
+with:
+
+```sh
+systemd/install.sh
+```
+
+The script builds the release binary, writes
+`security-scan.service` and `security-scan.timer` to
+`~/.config/systemd/user`, and enables the timer. It needs no root.
+
+As with any user unit, the timer only runs while the user manager does. On a
+machine you log out of, enable lingering so the timer keeps running:
+
+```sh
+loginctl enable-linger
+```
+
+The timer runs the scan at 04:17 local time with up to fifteen minutes of
+random delay, so it does not wake the machine at exactly the same moment as
+other nightly jobs. `Persistent=true` means a run missed while the machine was
+off happens at the next boot instead of being skipped. To use another time,
+change `OnCalendar` in `systemd/security-scan.timer.in` and reinstall:
+
+```sh
+systemd/install.sh                                    # after editing the timer
+systemctl --user list-timers security-scan.timer      # when it runs next
+systemctl --user start security-scan.service          # run a scan now
+journalctl --user -u security-scan                    # what a run did
+```
+
+`systemd/run-scan.sh` is what the service runs. A user service starts with a
+minimal `PATH`, which holds neither `uv` (`~/.local/bin`) nor `cdxgen` (in the
+Node.js nvm manages, whose directory changes with each Node.js version), so
+the script adds both before starting the scanner. It runs
+`target/release/security-scan`, so rebuild after changing the scanner; the
+install script does that. A Node.js installed system-wide needs nothing
+special, and `NVM_DIR` can be set in the unit if nvm lives elsewhere.
+
+The scan needs network access: a run that starts while the machine is offline
+fails and is retried by the next day's timer. The service runs at a low
+priority, and a failed scan — including one that finds cve-bin-tool data
+sources with missing or stale data — shows up as a failed unit:
+
+```sh
+systemctl --user status security-scan.service
+```
+
+To remove the units:
+
+```sh
+systemd/uninstall.sh
+```
