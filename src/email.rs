@@ -7,7 +7,9 @@
 
 use std::path::PathBuf;
 
-use lettre::message::Mailbox;
+use lettre::message::header::ContentType;
+use lettre::message::{Attachment, Mailbox, Message, MultiPart, SinglePart};
+use thiserror::Error;
 
 use crate::config::{Config, Tls};
 use crate::data_sources;
@@ -22,8 +24,18 @@ const ALERT: &str = "\u{1f6a8}";
 /// How many findings a project section lists before summarising the rest.
 const TOP_FINDINGS: usize = 10;
 
+/// How large the attachments to one message may be in total.
+const ATTACHMENT_LIMIT: usize = 10 * 1024 * 1024;
+
 /// The prefix that starts every alert's subject.
 pub const SUBJECT_PREFIX: &str = "[security-scan]";
+
+/// Why an alert could not be built or sent.
+#[derive(Debug, Error)]
+pub enum EmailError {
+    #[error("failed to build the message: {0}")]
+    Build(#[from] lettre::error::Error),
+}
 
 /// Everything needed to build and send an alert.
 #[derive(Debug, Clone)]
@@ -234,6 +246,81 @@ fn describe_data_sources(report: &data_sources::Report) -> String {
     lines.join("\n")
 }
 
+/// Build an alert message with a plain-text body and JSON attachments.
+///
+/// Attachments are `(filename, bytes)` pairs. When they total more than
+/// [`ATTACHMENT_LIMIT`], the files that do not fit are left out and named in
+/// the body instead, so a large scan still sends its findings.
+pub fn message(
+    settings: &Settings,
+    subject: &str,
+    body: &str,
+    attachments: &[(String, Vec<u8>)],
+) -> Result<Message, EmailError> {
+    let (kept, skipped) = select_attachments(attachments);
+    let text = body_with_attachment_note(body, &skipped);
+
+    let mut builder = Message::builder()
+        .from(settings.from.clone())
+        .subject(subject);
+    for recipient in &settings.to {
+        builder = builder.to(recipient.clone());
+    }
+
+    let mut multipart = MultiPart::mixed().singlepart(SinglePart::plain(text));
+    for (name, bytes) in kept {
+        multipart = multipart.singlepart(attachment(name, bytes));
+    }
+
+    Ok(builder.multipart(multipart)?)
+}
+
+/// Split attachments into those that fit under the size limit and those that
+/// do not, keeping the caller's order.
+fn select_attachments(attachments: &[(String, Vec<u8>)]) -> (Vec<&(String, Vec<u8>)>, Vec<&str>) {
+    let mut total = 0;
+    let mut kept = Vec::new();
+    let mut skipped = Vec::new();
+
+    for item in attachments {
+        let size = item.1.len();
+        if total + size <= ATTACHMENT_LIMIT {
+            total += size;
+            kept.push(item);
+        } else {
+            skipped.push(item.0.as_str());
+        }
+    }
+
+    (kept, skipped)
+}
+
+/// Add a note to the body when attachments were too large to send.
+fn body_with_attachment_note(body: &str, skipped: &[&str]) -> String {
+    if skipped.is_empty() {
+        return body.to_string();
+    }
+
+    let mut text = body.to_string();
+    text.push_str(&format!(
+        "\n\nAttachments skipped (the total is over {} MB)\n",
+        ATTACHMENT_LIMIT / 1024 / 1024
+    ));
+    for name in skipped {
+        text.push_str(&format!("  {name}\n"));
+    }
+
+    text
+}
+
+/// One JSON file attachment.
+fn attachment(name: &str, bytes: &[u8]) -> SinglePart {
+    Attachment::new(name.to_string()).body(
+        bytes.to_vec(),
+        ContentType::parse("application/json").expect("valid content type"),
+    )
+}
+
 /// Problems with the settings that do not stop an alert from being sent.
 ///
 /// Gmail only accepts the authenticated address, or an alias verified for it,
@@ -306,6 +393,10 @@ mod tests {
     #[test]
     fn a_local_relay_without_a_user_does_not_warn() {
         assert!(warnings(&settings("scan@example.com", None)).is_empty());
+    }
+
+    fn render(message: &Message) -> String {
+        String::from_utf8_lossy(&message.formatted()).into_owned()
     }
 
     fn cve(severity: &str, number: &str, remarks: &str) -> Cve {
@@ -551,5 +642,134 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("/projects/gamma: no SBOM found"), "{body}");
+    }
+
+    #[test]
+    fn the_message_has_from_to_and_subject_headers() {
+        let mut settings = settings("Security Scan <scan@example.com>", Some("scan@example.com"));
+        settings.to = vec![
+            "a@example.com".parse().unwrap(),
+            "B <b@example.com>".parse().unwrap(),
+        ];
+
+        let message =
+            message(&settings, "✅ [security-scan] 1 project clean", "body", &[]).unwrap();
+        let formatted = render(&message);
+
+        assert!(
+            formatted.contains("From: \"Security Scan\" <scan@example.com>")
+                || formatted.contains("From: Security Scan <scan@example.com>"),
+            "{formatted}"
+        );
+        assert!(formatted.contains("a@example.com"), "{formatted}");
+        assert!(formatted.contains("b@example.com"), "{formatted}");
+        assert!(formatted.contains("Subject: "), "{formatted}");
+        assert!(
+            formatted.contains("Content-Type: text/plain"),
+            "{formatted}"
+        );
+    }
+
+    #[test]
+    fn the_message_encodes_the_emoji_subject() {
+        let message = message(
+            &settings("scan@example.com", Some("scan@example.com")),
+            "🚨 [security-scan] 1 high",
+            "body",
+            &[],
+        )
+        .unwrap();
+
+        let formatted = render(&message);
+        assert!(formatted.contains("Subject: =?utf-8?"), "{formatted}");
+        assert!(!formatted.contains("Subject: 🚨"), "{formatted}");
+    }
+
+    #[test]
+    fn the_message_attaches_json_files() {
+        let attachments = vec![
+            ("cve-report.json".to_string(), b"{}".to_vec()),
+            ("data-sources.json".to_string(), b"[]".to_vec()),
+        ];
+
+        let message = message(
+            &settings("scan@example.com", Some("scan@example.com")),
+            "subject",
+            "body",
+            &attachments,
+        )
+        .unwrap();
+        let formatted = render(&message);
+
+        assert!(formatted.contains("multipart/mixed"), "{formatted}");
+        assert!(formatted.contains("boundary="), "{formatted}");
+        assert!(
+            formatted.contains("filename=\"cve-report.json\""),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("filename=\"data-sources.json\""),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("Content-Disposition: attachment"),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("Content-Type: application/json"),
+            "{formatted}"
+        );
+    }
+
+    #[test]
+    fn an_oversized_attachment_is_left_out_and_named_in_the_body() {
+        let attachments = vec![("huge.json".to_string(), vec![b'x'; ATTACHMENT_LIMIT + 1])];
+
+        let message = message(
+            &settings("scan@example.com", Some("scan@example.com")),
+            "subject",
+            "Findings are in the body.",
+            &attachments,
+        )
+        .unwrap();
+        let formatted = render(&message);
+
+        assert!(!formatted.contains("filename=\"huge.json\""), "{formatted}");
+        assert!(formatted.contains("Attachments skipped"), "{formatted}");
+        assert!(formatted.contains("huge.json"), "{formatted}");
+    }
+
+    #[test]
+    fn attachments_that_exactly_fill_the_limit_are_kept() {
+        let attachments = vec![("full.json".to_string(), vec![b'x'; ATTACHMENT_LIMIT])];
+
+        let (kept, skipped) = select_attachments(&attachments);
+
+        assert_eq!(kept.len(), 1);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn later_attachments_are_skipped_until_they_fit_again() {
+        let attachments = vec![
+            ("first.json".to_string(), vec![0; 6 * 1024 * 1024]),
+            ("second.json".to_string(), vec![0; 5 * 1024 * 1024]),
+            ("small.json".to_string(), vec![0; 1024]),
+        ];
+
+        let (kept, skipped) = select_attachments(&attachments);
+
+        let names: Vec<&str> = kept.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["first.json", "small.json"]);
+        assert_eq!(skipped, vec!["second.json"]);
+    }
+
+    #[test]
+    fn the_body_lists_every_skipped_attachment() {
+        let text = body_with_attachment_note("body", &["a.json", "b.json"]);
+
+        assert!(text.starts_with("body\n\n"), "{text}");
+        assert!(text.contains("a.json"), "{text}");
+        assert!(text.contains("b.json"), "{text}");
     }
 }
