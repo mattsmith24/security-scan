@@ -13,7 +13,8 @@ Install cdxgen
 npm install -g @cdxgen/cdxgen --ignore-scripts --min-release-age=2
 ```
 
-Install cve-bin-tool with uv, from my fork rather than upstream:
+Install cve-bin-tool with uv, from my fork rather than upstream, into a
+virtual environment at the root of this checkout:
 
 ```sh
 git clone --branch fix/npm-scope-preservation \
@@ -73,6 +74,15 @@ SBOM records, and the vendor is the project's `vendor` setting in the config.
 Everything cve-bin-tool needs comes from the SBOM and from its own database,
 so nothing here asks npm for its advisories.
 
+`cve-bin-tool` is a Python program, so the scanner runs it through `uv` rather
+than calling it directly. `uv` looks for its environment in the working
+directory, and the scanner runs it in the directory holding the config file.
+Keep `config.toml` in this checkout beside the `.venv` created above — being
+gitignored only keeps it out of version control. A config in another directory
+has no environment next to it, so `uv` fails to find `cve-bin-tool`. If the
+config has to live elsewhere, set `CVE_BIN_TOOL_PATH` to a cve-bin-tool
+executable to bypass `uv`.
+
 Run the scanner with:
 
 ```sh
@@ -110,7 +120,8 @@ named file instead. The scanner removes the previous report first, so that a
 scan always writes to the same path and leaves no stray files behind.
 
 Set `CVE_BIN_TOOL_PATH` to the path of a cve-bin-tool binary to run that
-instead of going through `uv`.
+instead of going through `uv`. It is the escape hatch for a config that is not
+in this checkout, or for a cve-bin-tool installed outside the uv environment.
 
 ## Vulnerability data
 
