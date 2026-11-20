@@ -6,9 +6,13 @@
 //! output stays independent of email.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use lettre::message::header::ContentType;
 use lettre::message::{Attachment, Mailbox, Message, MultiPart, SinglePart};
+use lettre::transport::smtp::Error as SmtpError;
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::{SmtpTransport, Transport};
 use thiserror::Error;
 
 use crate::config::{Config, Tls};
@@ -27,6 +31,9 @@ const TOP_FINDINGS: usize = 10;
 /// How large the attachments to one message may be in total.
 const ATTACHMENT_LIMIT: usize = 10 * 1024 * 1024;
 
+/// How long to wait on the SMTP server before giving up.
+const TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The prefix that starts every alert's subject.
 pub const SUBJECT_PREFIX: &str = "[security-scan]";
 
@@ -35,6 +42,23 @@ pub const SUBJECT_PREFIX: &str = "[security-scan]";
 pub enum EmailError {
     #[error("failed to build the message: {0}")]
     Build(#[from] lettre::error::Error),
+
+    #[error("failed to configure the SMTP connection to {host}:{port}: {source}")]
+    Configure {
+        host: String,
+        port: u16,
+        #[source]
+        source: SmtpError,
+    },
+
+    #[error("failed to send email through {host}:{port}: {source}{hint}")]
+    Send {
+        host: String,
+        port: u16,
+        #[source]
+        source: SmtpError,
+        hint: String,
+    },
 }
 
 /// Everything needed to build and send an alert.
@@ -321,6 +345,80 @@ fn attachment(name: &str, bytes: &[u8]) -> SinglePart {
     )
 }
 
+/// Send a built message through the configured SMTP server.
+pub fn send(settings: &Settings, message: &Message) -> Result<(), EmailError> {
+    let transport = transport(settings)?;
+    deliver(&transport, message, settings)
+}
+
+/// Build the transport for the configured TLS mode.
+///
+/// `relay` and `starttls_relay` validate certificates against the host and
+/// pick lettre's default ports, which are then overridden with the configured
+/// one. `builder_dangerous` sends unencrypted and is only for a local relay.
+fn transport(settings: &Settings) -> Result<SmtpTransport, EmailError> {
+    let builder = match settings.tls {
+        Tls::Implicit => SmtpTransport::relay(&settings.host),
+        Tls::Starttls => SmtpTransport::starttls_relay(&settings.host),
+        Tls::None => Ok(SmtpTransport::builder_dangerous(&settings.host)),
+    }
+    .map_err(|source| EmailError::Configure {
+        host: settings.host.clone(),
+        port: settings.port,
+        source,
+    })?;
+
+    let mut builder = builder.port(settings.port).timeout(Some(TIMEOUT));
+
+    if let (Some(user), Some(password)) = (&settings.user, &settings.password) {
+        builder = builder.credentials(Credentials::new(user.clone(), password.clone()));
+    }
+
+    Ok(builder.build())
+}
+
+/// Hand a message to any transport, so tests can record it instead of
+/// connecting.
+fn deliver<T>(transport: &T, message: &Message, settings: &Settings) -> Result<(), EmailError>
+where
+    T: Transport<Error = SmtpError>,
+{
+    transport.send(message).map(|_| ()).map_err(|source| {
+        let hint = send_hint(&source, settings.port);
+        EmailError::Send {
+            host: settings.host.clone(),
+            port: settings.port,
+            source,
+            hint,
+        }
+    })
+}
+
+/// A hint for the common ways SMTP delivery fails.
+fn send_hint(error: &SmtpError, port: u16) -> String {
+    // Gmail answers a wrong password with 535 5.7.8 and an ordinary
+    // password used where an App Password is needed with 534 5.7.9.
+    if let Some(535 | 534) = error.status().map(u16::from) {
+        return "; Gmail needs an App Password here, not the account password".to_string();
+    }
+
+    if error.is_timeout() {
+        return "; the SMTP server did not answer within 30 seconds".to_string();
+    }
+
+    if error.is_tls() {
+        return format!("; TLS failed; check smtp_tls and that port {port} is reachable");
+    }
+
+    if error.status().is_none() {
+        return format!(
+            "; check smtp_host, smtp_port ({port}) and that outbound connections are allowed"
+        );
+    }
+
+    String::new()
+}
+
 /// Problems with the settings that do not stop an alert from being sent.
 ///
 /// Gmail only accepts the authenticated address, or an alias verified for it,
@@ -346,6 +444,7 @@ pub fn warnings(settings: &Settings) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::config::Tls;
+    use std::cell::RefCell;
 
     fn settings(from: &str, user: Option<&str>) -> Settings {
         Settings {
@@ -771,5 +870,53 @@ mod tests {
         assert!(text.starts_with("body\n\n"), "{text}");
         assert!(text.contains("a.json"), "{text}");
         assert!(text.contains("b.json"), "{text}");
+    }
+
+    #[derive(Default)]
+    struct RecordingTransport {
+        sent: RefCell<Vec<Vec<u8>>>,
+    }
+
+    impl Transport for RecordingTransport {
+        type Ok = ();
+        type Error = SmtpError;
+
+        fn send_raw(
+            &self,
+            _envelope: &lettre::address::Envelope,
+            email: &[u8],
+        ) -> Result<Self::Ok, Self::Error> {
+            self.sent.borrow_mut().push(email.to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn send_hands_the_formatted_message_to_the_transport() {
+        let settings = settings("scan@example.com", Some("scan@example.com"));
+        let message = message(&settings, "subject", "body", &[]).unwrap();
+        let transport = RecordingTransport::default();
+
+        deliver(&transport, &message, &settings).unwrap();
+
+        let sent = transport.sent.borrow();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0], message.formatted());
+        assert!(String::from_utf8_lossy(&sent[0]).contains("Subject: subject"));
+    }
+
+    #[test]
+    fn transport_builds_for_every_tls_mode() {
+        for (tls, port) in [
+            (Tls::Implicit, 465),
+            (Tls::Starttls, 587),
+            (Tls::None, 1025),
+        ] {
+            let mut settings = settings("scan@example.com", Some("scan@example.com"));
+            settings.tls = tls;
+            settings.port = port;
+
+            assert!(transport(&settings).is_ok(), "{tls:?}");
+        }
     }
 }
