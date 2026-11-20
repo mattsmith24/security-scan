@@ -297,3 +297,116 @@ To remove the units:
 ```sh
 systemd/uninstall.sh
 ```
+
+## Email alerts
+
+A scan can email its report when it finishes. Email stays off unless
+`email_to`, `email_from` and `smtp_host` are all set, so a config without
+these keys behaves exactly as before:
+
+```toml
+email_to = ["you@gmail.com", "other@example.com"]
+email_from = "Security Scan <you@gmail.com>"
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+smtp_user = "you@gmail.com"
+smtp_password = "xxxx xxxx xxxx xxxx"
+
+# Optional: inferred from the port. 587 uses STARTTLS, 465 uses implicit TLS.
+# smtp_tls = "starttls"
+
+# Master switch; --no-email suppresses a single run.
+# email = true
+```
+
+`config.toml` now holds the password, so keep it private:
+
+```sh
+chmod 600 config.toml
+```
+
+The scanner prints a warning at startup when the file is readable by group or
+others. It also rejects malformed addresses, a `smtp_user` without a
+`smtp_password` (and the reverse), and an unknown `smtp_tls` when the config
+loads.
+
+### Gmail setup
+
+Gmail will not accept your normal account password here. Use an App Password:
+
+1. Turn on two-step verification for the Google account.
+2. Create an App Password at <https://myaccount.google.com/apppasswords>.
+3. Put the generated password in `smtp_password`, spaces included.
+
+`email_from` must be the authenticated address or an alias verified for it;
+Gmail rejects anything else. When the two differ, the scanner warns before
+scanning rather than letting the message fail after it. The display name is
+allowed (`Security Scan <you@gmail.com>`).
+
+Ports and TLS:
+
+| Setting | Use |
+|---|---|
+| `smtp_port = 587` (default) | STARTTLS, what Gmail uses |
+| `smtp_port = 465` | Implicit TLS; chosen automatically unless `smtp_tls` says otherwise |
+| `smtp_tls = "none"` | No TLS and, with no `smtp_user`, no auth — only for a local test relay |
+
+### Running and flags
+
+```sh
+cargo run -- config.toml                    # scan and email
+cargo run -- config.toml --no-email         # scan without emailing
+cargo run -- config.toml --email-dry-run    # print the message, send nothing
+```
+
+`--email-dry-run` prints the formatted MIME message to stdout, including the
+RFC 2047-encoded subject, so the body and attachments can be checked without a
+mail server or mailbox. Email failures (connection, authentication, a rejected
+message) print a warning and do not change the scan's exit code.
+
+The subject shows the worst active findings across all projects:
+
+- `✅ [security-scan] 2 projects clean` when no active finding is CRITICAL or
+  HIGH.
+- `🚨 [security-scan] 1 critical, 3 high` otherwise, with every severity that
+  has an active finding.
+
+Findings dismissed by the VEX (`NotAffected`, `FalsePositive`, `Mitigated`) do
+not count, matching the console summary, so triage can turn the subject green.
+MEDIUM and LOW findings leave the tick in place but are still counted.
+
+The body lists each project's package and dev-only counts, its severity
+breakdown, its ten worst active findings and how many the VEX filtered out,
+then the state of cve-bin-tool's vulnerability data and any directories that
+failed. Each project's `cve-report.json` is attached as
+`<project>-cve-report.json`, along with `data-sources.json`. Attachments over
+10 MB in total are left out and named in the body instead.
+
+The `triage` subcommand never emails: decisions made there are picked up by the
+next scan, and only `scan_command` can reach the send path.
+
+### Testing with Mailpit
+
+A local relay such as [Mailpit](https://mailpit.axllent.org/) is the easiest
+way to check delivery without a real mailbox:
+
+```sh
+mailpit                       # listens on 127.0.0.1:1025, UI on :8025
+```
+
+Point a copy of the config at it, with no credentials:
+
+```toml
+smtp_host = "127.0.0.1"
+smtp_port = 1025
+smtp_tls = "none"
+email_to = ["inbox@example.test"]
+email_from = "Security Scan <scan@example.test>"
+```
+
+Messages and the rendered body then appear at <http://localhost:8025>.
+
+The systemd units need no changes: the daily scan reads the same `config.toml`,
+so alerts work from the timer, and no password is placed in the unit's
+environment. Remember to rebuild the release binary after changing the scanner.
+
