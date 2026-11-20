@@ -1,4 +1,4 @@
-This is a security scanner tool. It is designed to use third party tools where possible.
+This is a security scanner tool.
 
 Version control is with jujutsu (jj).
 
