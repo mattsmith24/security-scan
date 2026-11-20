@@ -421,3 +421,7 @@ The systemd units need no changes: the daily scan reads the same `config.toml`,
 so alerts work from the timer, and no password is placed in the unit's
 environment. Remember to rebuild the release binary after changing the scanner.
 
+## License
+
+MIT, see [LICENSE](LICENSE).
+
