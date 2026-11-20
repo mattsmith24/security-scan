@@ -1,37 +1,117 @@
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use security_scan::config::Config;
 use security_scan::data_sources::{self, Report};
-use security_scan::email;
+use security_scan::email::{self, ProjectSummary};
 use security_scan::progress;
 use security_scan::scanner::{self, ScanError, cve_bin_tool, cve_bin_tool::Cve};
 use security_scan::triage;
 
 const USAGE: &str = "\
-usage: security-scan [config.toml] [output-dir]
+usage: security-scan [config.toml] [output-dir] [--no-email]
+       security-scan [config.toml] [output-dir] [--email-dry-run]
        security-scan triage <project> [--config config.toml] [--output output-dir]";
+
+/// How a scan run should handle email.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmailMode {
+    /// Send an alert when the scan finishes.
+    Send,
+
+    /// Suppress the alert for this run.
+    NoEmail,
+
+    /// Print the message instead of sending it.
+    DryRun,
+}
+
+/// The arguments for a scan run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScanMode {
+    config: PathBuf,
+    output: Option<PathBuf>,
+    email: EmailMode,
+}
+
+/// What the command line asks the scanner to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Mode {
+    Scan(ScanMode),
+    Triage,
+    Help,
+}
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
+    match parse_mode(&args) {
+        Ok(Mode::Scan(scan)) => scan_command(scan),
+        Ok(Mode::Triage) => triage_command(&args[1..]),
+        Ok(Mode::Help) => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("error: {message}\n{USAGE}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Work out what the arguments ask for.
+///
+/// `triage` is a separate subcommand with its own parser, so it is recognised
+/// before the scan flags are read. That keeps email flags out of its reach.
+fn parse_mode(args: &[OsString]) -> Result<Mode, String> {
     if args.first().and_then(|arg| arg.to_str()) == Some("triage") {
-        return triage_command(&args[1..]);
+        return Ok(Mode::Triage);
     }
 
-    scan_command(&args)
+    let mut config = None;
+    let mut output = None;
+    let mut no_email = false;
+    let mut dry_run = false;
+
+    for arg in args {
+        match arg.to_str() {
+            Some("-h" | "--help") => return Ok(Mode::Help),
+            Some("--no-email") => no_email = true,
+            Some("--email-dry-run") => dry_run = true,
+            Some(flag) if flag.starts_with('-') => {
+                return Err(format!("unknown option {flag}"));
+            }
+            _ if config.is_none() => config = Some(PathBuf::from(arg)),
+            _ if output.is_none() => output = Some(PathBuf::from(arg)),
+            _ => {
+                return Err(format!("unexpected argument {}", arg.to_string_lossy()));
+            }
+        }
+    }
+
+    if no_email && dry_run {
+        return Err("--no-email and --email-dry-run cannot be used together".to_string());
+    }
+
+    let email = match (no_email, dry_run) {
+        (true, _) => EmailMode::NoEmail,
+        (_, true) => EmailMode::DryRun,
+        _ => EmailMode::Send,
+    };
+
+    Ok(Mode::Scan(ScanMode {
+        config: config.unwrap_or_else(|| PathBuf::from("config.toml")),
+        output,
+        email,
+    }))
 }
 
 /// Run the scans, then report on the vulnerability data they used.
-fn scan_command(args: &[OsString]) -> ExitCode {
-    let mut args = args.iter();
-
-    let config_path = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("config.toml"));
-    let output_override = args.next().map(PathBuf::from);
+fn scan_command(mode: ScanMode) -> ExitCode {
+    let config_path = mode.config;
+    let output_override = mode.output;
 
     let config = match Config::load(&config_path) {
         Ok(config) => config,
@@ -42,6 +122,12 @@ fn scan_command(args: &[OsString]) -> ExitCode {
     };
     print_config_warnings(&config);
     print_email_warnings(&config);
+
+    let email_settings = if mode.email == EmailMode::NoEmail {
+        None
+    } else {
+        email::Settings::from_config(&config)
+    };
 
     let output_dir = output_override.unwrap_or_else(|| config.output_dir());
     let base_dir = config.base_dir.clone();
@@ -62,6 +148,8 @@ fn scan_command(args: &[OsString]) -> ExitCode {
     }
 
     let mut failures = 0;
+    let mut failure_messages = Vec::new();
+    let mut projects = Vec::new();
 
     for directory in &config.directories {
         progress::heading(format!(
@@ -92,9 +180,19 @@ fn scan_command(args: &[OsString]) -> ExitCode {
                     println!("    -> {}", output.display());
                 }
                 print_cves(&report.cves);
+
+                projects.push(ProjectSummary {
+                    name: report.name,
+                    kind: report.kind,
+                    components: report.components,
+                    dev_components: report.dev_components,
+                    cves: report.cves,
+                    report: report.report,
+                });
             }
             Err(error) => {
-                eprintln!("{}: {error}", directory.path.display());
+                let message = format!("{}: {error}", directory.path.display());
+                eprintln!("{message}");
 
                 // The OSV filter is global, so an SBOM that does not fit it
                 // will not be scanned correctly however many directories
@@ -105,6 +203,7 @@ fn scan_command(args: &[OsString]) -> ExitCode {
                 }
 
                 failures += 1;
+                failure_messages.push(message);
             }
         }
     }
@@ -116,6 +215,17 @@ fn scan_command(args: &[OsString]) -> ExitCode {
     let report = data_sources::check(&config.cache_dir(), config.stale_after());
     print_data_sources(&report);
     write_data_sources(&report, &output_dir);
+
+    if let Some(settings) = &email_settings {
+        send_email(
+            settings,
+            &projects,
+            &failure_messages,
+            &report,
+            &output_dir,
+            mode.email,
+        );
+    }
 
     if failures > 0 {
         eprintln!(
@@ -146,6 +256,95 @@ fn print_email_warnings(config: &Config) {
 
     for warning in email::warnings(&settings) {
         eprintln!("{warning}");
+    }
+}
+
+/// Build and send the alert for a finished scan.
+///
+/// A dry run prints the formatted message instead of connecting. Any failure
+/// is a warning: the scan's exit code still reflects the scan, not delivery.
+fn send_email(
+    settings: &email::Settings,
+    projects: &[ProjectSummary],
+    failures: &[String],
+    sources: &Report,
+    output_dir: &Path,
+    mode: EmailMode,
+) {
+    let subject = email::subject(&settings.prefix, projects);
+    let body = email::body(projects, failures, sources);
+    let attachments = attachments(projects, output_dir);
+
+    let message = match email::message(settings, &subject, &body, &attachments) {
+        Ok(message) => message,
+        Err(error) => {
+            eprintln!("warning: {error}");
+            return;
+        }
+    };
+
+    if mode == EmailMode::DryRun {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout);
+        let _ = stdout.write_all(&message.formatted());
+        let _ = stdout.flush();
+        return;
+    }
+
+    match email::send(settings, &message) {
+        Ok(()) => {
+            let recipients: Vec<String> = settings.to.iter().map(ToString::to_string).collect();
+            println!("\nemail: sent to {}", recipients.join(", "));
+        }
+        Err(error) => eprintln!("warning: {error}"),
+    }
+}
+
+/// Read the files an alert attaches: each project's CVE report and the
+/// data-source report. Files that cannot be read are named as warnings and
+/// left out.
+fn attachments(projects: &[ProjectSummary], output_dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut attachments = Vec::new();
+
+    for project in projects {
+        match std::fs::read(&project.report) {
+            Ok(bytes) => attachments.push((
+                format!("{}-cve-report.json", attachment_name(&project.name)),
+                bytes,
+            )),
+            Err(error) => eprintln!(
+                "warning: failed to attach {}: {error}",
+                project.report.display()
+            ),
+        }
+    }
+
+    let path = output_dir.join("data-sources.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => attachments.push(("data-sources.json".to_string(), bytes)),
+        Err(error) => eprintln!("warning: failed to attach {}: {error}", path.display()),
+    }
+
+    attachments
+}
+
+/// Make a project name safe to use in an attachment filename.
+fn attachment_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    if cleaned.is_empty() {
+        "project".to_string()
+    } else {
+        cleaned
     }
 }
 
@@ -354,5 +553,90 @@ fn print_cves(cves: &[Cve]) {
 
     if filtered > 0 {
         println!("    {filtered} filtered by the VEX");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
+    }
+
+    fn scan(config: &str, output: Option<&str>, email: EmailMode) -> Mode {
+        Mode::Scan(ScanMode {
+            config: PathBuf::from(config),
+            output: output.map(PathBuf::from),
+            email,
+        })
+    }
+
+    #[test]
+    fn the_default_run_uses_config_toml_and_sends_email() {
+        assert_eq!(
+            parse_mode(&[]).unwrap(),
+            scan("config.toml", None, EmailMode::Send)
+        );
+    }
+
+    #[test]
+    fn a_config_and_output_directory_are_both_positional() {
+        assert_eq!(
+            parse_mode(&args(&["scan.toml", "out"])).unwrap(),
+            scan("scan.toml", Some("out"), EmailMode::Send)
+        );
+    }
+
+    #[test]
+    fn no_email_suppresses_the_alert() {
+        assert_eq!(
+            parse_mode(&args(&["--no-email"])).unwrap(),
+            scan("config.toml", None, EmailMode::NoEmail)
+        );
+    }
+
+    #[test]
+    fn email_dry_run_prints_instead_of_sending() {
+        assert_eq!(
+            parse_mode(&args(&["config.toml", "--email-dry-run"])).unwrap(),
+            scan("config.toml", None, EmailMode::DryRun)
+        );
+    }
+
+    #[test]
+    fn the_two_email_flags_conflict() {
+        assert!(parse_mode(&args(&["--no-email", "--email-dry-run"])).is_err());
+    }
+
+    #[test]
+    fn triage_is_a_separate_mode_and_ignores_email_flags() {
+        assert_eq!(
+            parse_mode(&args(&["triage", "goalkeepr", "--email-dry-run"])).unwrap(),
+            Mode::Triage
+        );
+    }
+
+    #[test]
+    fn help_is_recognised() {
+        assert_eq!(parse_mode(&args(&["--help"])).unwrap(), Mode::Help);
+        assert_eq!(parse_mode(&args(&["-h"])).unwrap(), Mode::Help);
+    }
+
+    #[test]
+    fn unknown_options_are_rejected() {
+        assert!(parse_mode(&args(&["--email"])).is_err());
+    }
+
+    #[test]
+    fn a_third_positional_argument_is_rejected() {
+        assert!(parse_mode(&args(&["a.toml", "out", "extra"])).is_err());
+    }
+
+    #[test]
+    fn attachment_names_are_safe_for_filenames() {
+        assert_eq!(attachment_name("my project"), "my-project");
+        assert_eq!(attachment_name("a/b:c"), "a-b-c");
+        assert_eq!(attachment_name(""), "project");
     }
 }

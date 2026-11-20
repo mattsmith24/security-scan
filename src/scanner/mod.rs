@@ -21,12 +21,16 @@ use identity::Identity;
 /// A scan that completed, and what it produced.
 #[derive(Debug, Clone)]
 pub struct ScanReport {
+    /// The project's name, as recorded in its SBOM.
+    pub name: String,
     /// The directory that was scanned.
     pub directory: PathBuf,
     /// The kind of project it was recognised as.
     pub kind: String,
     /// The files written: the SBOM and the CVE report.
     pub outputs: Vec<PathBuf>,
+    /// The CVE report cve-bin-tool wrote.
+    pub report: PathBuf,
     /// How many packages the SBOM describes.
     pub components: usize,
     /// How many of those are dev-only dependencies.
@@ -145,15 +149,17 @@ pub fn scan(
         count => format!("{count} vulnerabilities found"),
     });
 
-    let mut outputs = vec![sbom.path, cves.report];
+    let mut outputs = vec![sbom.path, cves.report.clone()];
     if let Some(vex) = &cves.vex {
         outputs.push(vex.clone());
     }
 
     Ok(ScanReport {
+        name: identity.name,
         directory: directory.path.clone(),
         kind: directory.kind.clone(),
         outputs,
+        report: cves.report,
         components: sbom.components,
         dev_components: sbom.dev_components,
         licenses: sbom.licenses,
