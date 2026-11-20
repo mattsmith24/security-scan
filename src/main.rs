@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use security_scan::config::Config;
 use security_scan::data_sources::{self, Report};
+use security_scan::email;
 use security_scan::progress;
 use security_scan::scanner::{self, ScanError, cve_bin_tool, cve_bin_tool::Cve};
 use security_scan::triage;
@@ -40,6 +41,7 @@ fn scan_command(args: &[OsString]) -> ExitCode {
         }
     };
     print_config_warnings(&config);
+    print_email_warnings(&config);
 
     let output_dir = output_override.unwrap_or_else(|| config.output_dir());
     let base_dir = config.base_dir.clone();
@@ -129,6 +131,20 @@ fn scan_command(args: &[OsString]) -> ExitCode {
 /// Print config problems that do not stop the scan.
 fn print_config_warnings(config: &Config) {
     for warning in config.warnings() {
+        eprintln!("{warning}");
+    }
+}
+
+/// Warn about email settings that look wrong, before the scan starts.
+///
+/// Only `scan_command` calls this: `triage` never sends email, so its
+/// settings do not matter there.
+fn print_email_warnings(config: &Config) {
+    let Some(settings) = email::Settings::from_config(config) else {
+        return;
+    };
+
+    for warning in email::warnings(&settings) {
         eprintln!("{warning}");
     }
 }
